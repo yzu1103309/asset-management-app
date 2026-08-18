@@ -1,0 +1,114 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        node: [22.x]
+
+    steps:
+      - name: Check for EXPO_TOKEN
+        run: |
+          if [ -z "${{ secrets.EXPO_TOKEN }}" ]; then
+            echo "You must provide an EXPO_TOKEN secret linked to this project's Expo account in this repo's secrets. Learn more: https://docs.expo.dev/eas-update/github-actions"
+            exit 1
+          fi
+
+      - name: 🏗 Setup repo
+        uses: actions/checkout@v5
+
+      - name: 🔖 Read app version
+        run: echo "APP_VERSION=$(jq -r .expo.version app.json)" >> "$GITHUB_ENV"
+
+      - name: 🏗 Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: yarn
+
+      - name: 🏗 Setup Expo and EAS
+        uses: expo/expo-github-action@v7
+        with:
+          token: ${{ secrets.EXPO_TOKEN }}
+          expo-version: latest
+          eas-version: latest
+
+      - name: 🔓 Restore private data
+        run: wget ${{ secrets.TEST_DATA_URL }} ${{ secrets.CONSTANTS_URL }} -q -P constants
+
+      - name: 📦 Install dependencies
+        run: yarn
+
+      - name: 📦 Prebuild (iOS)
+        run: npx expo prebuild --platform ios --non-interactive
+
+      - name: ♻️ Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: |
+            ios/Pods
+            ~/Library/Caches/CocoaPods
+            ~/.cocoapods
+          key: ${{ runner.os }}-pods-${{ hashFiles('ios/Podfile.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pods-
+
+      - name: 📦 Install Pods
+        run: |
+          cd ios
+          pod install --repo-update
+
+      - name: 👷 Build archive (xcarchive)
+        run: |
+          cd ios
+          xcodebuild \
+            -scheme Astalog \
+            -workspace Astalog.xcworkspace \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            clean archive \
+            -archivePath "build/Astalog.xcarchive" \
+            -quiet \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      # Pack an unsigned .ipa (zip of Payload/*.app). Typically not installable on real devices without signing.
+      - name: 📦 Pack unsigned IPA
+        run: |
+          APP_PATH=$(find "ios/build/Astalog.xcarchive/Products/Applications" -maxdepth 1 -type d -name "*.app" -print -quit)
+          if [ -z "$APP_PATH" ]; then
+            echo "No .app found in archive."
+            echo "Available items:"
+            ls -la "ios/build/Astalog.xcarchive/Products/Applications" || true
+            exit 1
+          fi
+
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+
+          /usr/bin/zip -r "Astalog-${APP_VERSION}.ipa" Payload
+
+      - name: 🚀 Publish IPA to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${APP_VERSION}"
+          FILE="Astalog-${APP_VERSION}.ipa"
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "Version ${APP_VERSION}" \
+              --notes "Astalog Version ${APP_VERSION}"
+          fi
+
+          gh release upload "$TAG" "$FILE" --clobber

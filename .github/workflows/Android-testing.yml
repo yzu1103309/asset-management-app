@@ -1,0 +1,79 @@
+name: Build Android (No release)
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        type: choice
+        description: Build profile to use
+        options:
+          - production
+          - preview
+          - development
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [22.x]
+
+    steps:
+      - name: Check for EXPO_TOKEN
+        run: |
+          if [ -z "${{ secrets.EXPO_TOKEN }}" ]; then
+            echo "You must provide an EXPO_TOKEN secret linked to this project's Expo account in this repo's secrets. Learn more: https://docs.expo.dev/eas-update/github-actions"
+            exit 1
+          fi
+
+      - name: 🏗 Setup repo
+        uses: actions/checkout@v5
+
+      - name: 🔖 Read app version
+        run: echo "APP_VERSION=$(jq -r .expo.version app.json)" >> "$GITHUB_ENV"
+
+      - name: 🏗 Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: yarn
+
+      - name: ☕️ Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: 🧠 Increase Gradle JVM memory
+        run: |
+          echo "JAVA_TOOL_OPTIONS=-Xmx4096m -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8" >> $GITHUB_ENV
+          echo "GRADLE_OPTS=-Dorg.gradle.jvmargs='-Xmx4096m -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8'" >> $GITHUB_ENV
+
+      - name: 🏗 Setup Expo and EAS
+        uses: expo/expo-github-action@v7
+        with:
+          token: ${{ secrets.EXPO_TOKEN }}
+          expo-version: latest
+          eas-version: latest
+
+      - name: 🏗 Setup EAS local builds
+        run: yarn global add eas-cli-local-build-plugin
+
+      - name: 🔓 Restore private data
+        run: wget ${{ secrets.TEST_DATA_URL }} ${{ secrets.CONSTANTS_URL }} -q -P constants
+
+      - name: 📦 Install dependencies
+        run: yarn
+
+      - name: 📦 Prebuild app
+        run: npx expo prebuild --platform android
+
+      - name: 👷 Build app
+        run: |
+          eas build --local --non-interactive --output=./BOOKeeper-${APP_VERSION}.apk --platform=android --profile=${{ github.event.inputs.profile }}
+
+      - name: 📱 Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: BOOKeeper-${{ env.APP_VERSION }}.apk
+          path: BOOKeeper-${{ env.APP_VERSION }}.apk
+          retention-days: 14

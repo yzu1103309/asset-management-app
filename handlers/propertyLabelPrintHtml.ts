@@ -145,7 +145,7 @@ export function buildPropertyLabelPrintHtml(
         .label {
             width: 7cm;
             height: 3.3cm;
-            padding: 0.18cm 0.4cm;
+            padding: 0.18cm 0.45cm;
             display: flex;
             align-items: center;
             justify-content: space-between;

@@ -1,0 +1,110 @@
+name: Build iOS IPA (No release)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        node: [22.x]
+
+    steps:
+      - name: Check for EXPO_TOKEN
+        run: |
+          if [ -z "${{ secrets.EXPO_TOKEN }}" ]; then
+            echo "You must provide an EXPO_TOKEN secret linked to this project's Expo account in this repo's secrets. Learn more: https://docs.expo.dev/eas-update/github-actions"
+            exit 1
+          fi
+
+      - name: 🏗 Setup repo
+        uses: actions/checkout@v5
+
+      - name: 🔖 Read app version
+        run: echo "APP_VERSION=$(jq -r .expo.version app.json)" >> "$GITHUB_ENV"
+
+      - name: 🏗 Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: yarn
+
+      - name: 🏗 Setup Expo and EAS
+        uses: expo/expo-github-action@v7
+        with:
+          token: ${{ secrets.EXPO_TOKEN }}
+          expo-version: latest
+          eas-version: latest
+
+      - name: 🔓 Restore private data
+        run: wget ${{ secrets.TEST_DATA_URL }} ${{ secrets.CONSTANTS_URL }} -q -P constants
+
+      - name: 📦 Install dependencies
+        run: yarn
+
+      - name: 📦 Prebuild (iOS)
+        run: npx expo prebuild --platform ios --non-interactive
+
+      - name: ♻️ Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: |
+            ios/Pods
+            ~/Library/Caches/CocoaPods
+            ~/.cocoapods
+          key: ${{ runner.os }}-pods-${{ hashFiles('ios/Podfile.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pods-
+
+      - name: 📦 Install Pods
+        run: |
+          cd ios
+          pod install --repo-update
+
+      - name: 👷 Build archive (xcarchive)
+        run: |
+          cd ios
+          xcodebuild \
+            -scheme BOOKeeper \
+            -workspace BOOKeeper.xcworkspace \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            clean archive \
+            -archivePath "build/BOOKeeper.xcarchive" \
+            -quiet \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      # Optional: pack an unsigned .ipa (zip of Payload/*.app). Typically not installable on real devices without signing.
+      - name: 📦 Pack unsigned IPA (optional)
+        run: |
+          APP_PATH=$(find "ios/build/BOOKeeper.xcarchive/Products/Applications" -maxdepth 1 -type d -name "*.app" -print -quit)
+          if [ -z "$APP_PATH" ]; then
+            echo "No .app found in archive."
+            echo "Available items:"
+            ls -la "ios/build/BOOKeeper.xcarchive/Products/Applications" || true
+            exit 1
+          fi
+
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+
+          /usr/bin/zip -r "BOOKeeper-${APP_VERSION}.ipa" Payload
+
+      - name: 📱 Upload xcarchive
+        uses: actions/upload-artifact@v4
+        with:
+          name: BOOKeeper-${{ env.APP_VERSION }}.xcarchive
+          path: ios/build/BOOKeeper.xcarchive
+          retention-days: 14
+
+      - name: 📱 Upload unsigned ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: BOOKeeper-${{ env.APP_VERSION }}.ipa
+          path: BOOKeeper-${{ env.APP_VERSION }}.ipa
+          retention-days: 14

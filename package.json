@@ -1,5 +1,5 @@
 {
-  "name": "property-ckeching-app",
+  "name": "asset-management-app",
   "main": "expo-router/entry",
   "version": "0.0.1.0",
   "scripts": {
@@ -40,6 +40,7 @@
     "expo-status-bar": "~3.0.9",
     "expo-symbols": "~1.0.8",
     "expo-system-ui": "~6.0.9",
+    "expo-updates": "~29.0.20",
     "expo-web-browser": "~15.0.11",
     "fuse.js": "^7.5.0",
     "qrcode-terminal": "0.11.0",
