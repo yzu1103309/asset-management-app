@@ -62,8 +62,8 @@ jobs:
       - name: 🏗 Setup EAS local builds
         run: yarn global add eas-cli-local-build-plugin
 
-      - name: 🔓 Restore private data
-        run: wget ${{ secrets.TEST_DATA_URL }} ${{ secrets.CONSTANTS_URL }} -q -P constants
+      # - name: 🔓 Restore private data
+      #   run: wget ${{ secrets.TEST_DATA_URL }} ${{ secrets.CONSTANTS_URL }} -q -P constants
 
       - name: 📦 Install dependencies
         run: yarn

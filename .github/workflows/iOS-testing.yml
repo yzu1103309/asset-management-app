@@ -37,8 +37,8 @@ jobs:
           expo-version: latest
           eas-version: latest
 
-      - name: 🔓 Restore private data
-        run: wget ${{ secrets.TEST_DATA_URL }} ${{ secrets.CONSTANTS_URL }} -q -P constants
+      # - name: 🔓 Restore private data
+      #   run: wget ${{ secrets.TEST_DATA_URL }} ${{ secrets.CONSTANTS_URL }} -q -P constants
 
       - name: 📦 Install dependencies
         run: yarn
