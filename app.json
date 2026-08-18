@@ -1,11 +1,11 @@
 {
   "expo": {
-    "name": "ncu-property-ckeching-app",
-    "slug": "ncu-property-ckeching-app",
-    "version": "1.0.0",
+    "name": "財產盤點",
+    "slug": "property-ckecking-app",
+    "version": "0.0.1.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "ncupropertyckechingapp",
+    "scheme": "p-ckeck",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
@@ -13,17 +13,15 @@
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png",
-        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+        "backgroundColor": "#4A4A4A",
+        "foregroundImage": "./assets/images/adaptive-icon.png"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false
     },
     "web": {
       "output": "static",
-      "favicon": "./assets/images/favicon.png"
+      "favicon": "./assets/images/icon.png"
     },
     "plugins": [
       "expo-router",
@@ -31,12 +29,27 @@
         "expo-splash-screen",
         {
           "image": "./assets/images/splash-icon.png",
-          "imageWidth": 200,
+          "imageWidth": 320,
           "resizeMode": "contain",
-          "backgroundColor": "#ffffff",
+          "backgroundColor": "#4A4A4A",
           "dark": {
-            "backgroundColor": "#000000"
+            "backgroundColor": "#4A4A4A"
           }
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "允許讀取照片，用於保存財產照片。",
+          "cameraPermission": "允許開啟相機，用於拍攝財產照片。",
+          "microphonePermission": false
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "允許讀取照片，用於保存財產照片。",
+          "savePhotosPermission": "允許儲存照片至相簿。"
         }
       ]
     ],
