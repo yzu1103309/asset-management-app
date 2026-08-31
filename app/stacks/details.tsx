@@ -3,6 +3,7 @@ import {
     ActivityIndicator,
     Alert,
     Animated,
+    Easing,
     KeyboardAvoidingView,
     Modal,
     Platform,
@@ -396,6 +397,19 @@ function DetailTextEditModal({
         () => getSuggestedPropertyTextSuggestions(text, suggestions),
         [suggestions, text],
     );
+    const suggestionsVisibility = useRef(new Animated.Value(0)).current;
+    const showSuggestions = isEditing && filteredSuggestions.length > 0;
+    const suggestionsAnimatedStyle = {
+        opacity: suggestionsVisibility,
+        maxHeight: suggestionsVisibility.interpolate({
+            inputRange: [0, 1],
+            outputRange: [0, 48],
+        }),
+        marginTop: suggestionsVisibility.interpolate({
+            inputRange: [0, 1],
+            outputRange: [0, 10],
+        }),
+    };
 
     useEffect(() => {
         if (!target) {
@@ -408,6 +422,15 @@ function DetailTextEditModal({
         setText(nextText);
         setIsEditing(!nextText.trim());
     }, [target]);
+
+    useEffect(() => {
+        Animated.timing(suggestionsVisibility, {
+            toValue: showSuggestions ? 1 : 0,
+            duration: 160,
+            easing: Easing.out(Easing.cubic),
+            useNativeDriver: false,
+        }).start();
+    }, [showSuggestions, suggestionsVisibility]);
 
     const handleTextChange = (nextText: string) => {
         setText(nextText.replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").slice(0, limit));
@@ -498,29 +521,30 @@ function DetailTextEditModal({
                                 mt="md"
                             />
 
-                            {filteredSuggestions.length > 0 && (
-                                <View style={styles.textSuggestionSection}>
-                                    <ScrollView
-                                        horizontal
-                                        showsHorizontalScrollIndicator={false}
-                                        contentContainerStyle={styles.textSuggestionList}
-                                        keyboardShouldPersistTaps="handled"
-                                    >
-                                        {filteredSuggestions.map((suggestion) => (
-                                            <TouchableOpacity
-                                                key={suggestion}
-                                                activeOpacity={0.78}
-                                                onPress={() => setText(suggestion)}
-                                                style={styles.textSuggestionChip}
-                                            >
-                                                <Text color="blue700" fontSize="sm" fontWeight="bold" numberOfLines={1}>
-                                                    {suggestion}
-                                                </Text>
-                                            </TouchableOpacity>
-                                        ))}
-                                    </ScrollView>
-                                </View>
-                            )}
+                            <Animated.View
+                                pointerEvents={showSuggestions ? "auto" : "none"}
+                                style={[styles.textSuggestionSection, suggestionsAnimatedStyle]}
+                            >
+                                <ScrollView
+                                    horizontal
+                                    showsHorizontalScrollIndicator={false}
+                                    contentContainerStyle={styles.textSuggestionList}
+                                    keyboardShouldPersistTaps="handled"
+                                >
+                                    {filteredSuggestions.map((suggestion) => (
+                                        <TouchableOpacity
+                                            key={suggestion}
+                                            activeOpacity={0.78}
+                                            onPress={() => setText(suggestion)}
+                                            style={styles.textSuggestionChip}
+                                        >
+                                            <Text color="blue700" fontSize="sm" fontWeight="bold" numberOfLines={1}>
+                                                {suggestion}
+                                            </Text>
+                                        </TouchableOpacity>
+                                    ))}
+                                </ScrollView>
+                            </Animated.View>
 
                             <View style={styles.modalFooterRow}>
                                 <Button
@@ -2364,6 +2388,7 @@ const styles = StyleSheet.create({
     },
     textSuggestionSection: {
         marginTop: 10,
+        overflow: "hidden",
     },
     textSuggestionList: {
         gap: 8,
