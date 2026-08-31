@@ -230,10 +230,18 @@ export default function I()
             propertyName={item.propertyName}
             status={item.status}
             onPress={() => {
-                router.push({pathname: "/stacks/details", params: {barcode: item.barcode, entityIndex: String(item.entityIndex), status: item.status}});
+                router.push({
+                    pathname: "/stacks/details",
+                    params: {
+                        barcode: item.barcode,
+                        entityIndex: String(item.entityIndex),
+                        status: item.status,
+                        ...(selectedYear ? {year: selectedYear} : {}),
+                    },
+                });
             }}
         />
-    ), []);
+    ), [selectedYear]);
 
     return (
         <View style={[styles.container, {paddingTop: insets.top + 15  }]}>

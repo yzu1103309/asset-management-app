@@ -5,6 +5,11 @@ import {
     type PropertyHtmlParseResult,
 } from "./propertyHtmlParser.ts";
 import {
+    parsePropertySpreadsheetBytes,
+    type PropertySpreadsheetParseOptions,
+    type PropertySpreadsheetParseResult,
+} from "./propertySpreadsheetParser.ts";
+import {
     getPropertyItemYears,
     mergePropertyItems,
     parseStoredPropertyItems,
@@ -29,6 +34,11 @@ export type PropertyImportResult = PropertyHtmlParseResult & {
     createdCount: number;
     updatedCount: number;
     sourceYear: string;
+    sourceYears: string[];
+};
+
+export type PropertyFileImportOptions = {
+    spreadsheet?: PropertySpreadsheetParseOptions;
 };
 
 function getYearFromFileName(sourceName?: string): string | undefined {
@@ -64,6 +74,16 @@ export async function importPropertyHtmlBytes(bytes: Uint8Array, sourceName?: st
     return saveParsedPropertyItems(parsePropertyHtmlBytes(bytes), sourceName);
 }
 
+export async function importPropertyFileBytes(bytes: Uint8Array, sourceName?: string, options: PropertyFileImportOptions = {}): Promise<PropertyImportResult> {
+    const lowerName = sourceName?.toLowerCase() ?? "";
+    const isSpreadsheetFile = /\.(xlsx|xls|xsl)$/i.test(lowerName);
+    const isZipBasedSpreadsheet = bytes[0] === 0x50 && bytes[1] === 0x4b;
+
+    return isSpreadsheetFile || isZipBasedSpreadsheet
+        ? saveParsedPropertySpreadsheet(parsePropertySpreadsheetBytes(bytes, sourceName, options.spreadsheet))
+        : importPropertyHtmlBytes(bytes, sourceName);
+}
+
 async function saveParsedPropertyItems(parsed: PropertyHtmlParseResult, sourceName?: string): Promise<PropertyImportResult> {
     const storedItems = await getStoredPropertyItems();
     const importedAt = new Date().toISOString();
@@ -84,5 +104,47 @@ async function saveParsedPropertyItems(parsed: PropertyHtmlParseResult, sourceNa
         await initializeAnnualPropertyEntityStatuses(sourceYear, importedEntryKeys);
     }
 
-    return {...parsed, sourceYear, createdCount: merged.createdCount, updatedCount: merged.updatedCount};
+    return {...parsed, sourceYear, sourceYears: [sourceYear], createdCount: merged.createdCount, updatedCount: merged.updatedCount};
+}
+
+async function saveParsedPropertySpreadsheet(parsed: PropertySpreadsheetParseResult): Promise<PropertyImportResult> {
+    const storedItems = await getStoredPropertyItems();
+    const importedAt = new Date().toISOString();
+    const sourceYears = parsed.sourceYears;
+    const existingYears = getPropertyItemYears(storedItems);
+
+    for (const sourceYear of sourceYears) {
+        assertSupportedImportYear(existingYears, sourceYear);
+    }
+
+    let mergedItems = storedItems;
+    let createdCount = 0;
+    let updatedCount = 0;
+
+    for (const sourceYear of sourceYears) {
+        const merged = mergePropertyItems(mergedItems, parsed.itemsByYear[sourceYear], importedAt, sourceYear);
+        mergedItems = merged.items;
+        createdCount += merged.createdCount;
+        updatedCount += merged.updatedCount;
+    }
+
+    await AsyncStorage.setItem(PROPERTY_ITEMS_STORAGE_KEY, JSON.stringify(mergedItems));
+    await Promise.all(sourceYears.map(async (sourceYear) => {
+        const importedEntryKeys = getAnnualPropertyStatusEntryKeysForItems(mergedItems, sourceYear);
+        if (await hasAnnualPropertyStatuses(sourceYear)) {
+            await mergeImportedEntriesIntoAnnualPropertyStatuses(sourceYear, importedEntryKeys);
+        } else {
+            await initializeAnnualPropertyEntityStatuses(sourceYear, importedEntryKeys);
+        }
+    }));
+
+    return {
+        items: sourceYears.flatMap((sourceYear) => parsed.itemsByYear[sourceYear]),
+        skippedRowCount: parsed.skippedRowCount,
+        duplicateBarcodeCount: parsed.duplicateBarcodeCount,
+        sourceYear: sourceYears.join(", "),
+        sourceYears,
+        createdCount,
+        updatedCount,
+    };
 }

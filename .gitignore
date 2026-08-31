@@ -46,3 +46,6 @@ app-example
 .claude
 .idea
 ex-data
+
+credentials.json
+apks

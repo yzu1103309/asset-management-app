@@ -20,10 +20,12 @@ test("decodes and parses a legacy property export fixture", () => {
         itemNumber: "2",
         barcode: "1234567-01-10002",
         propertyName: "測試螢幕 & 轉接線",
+        custodianName: "李小華",
     });
     assert.deepEqual(result.items.find((item) => item.itemNumber === "6"), {
         itemNumber: "6",
         barcode: "9988776-03-30002",
         propertyName: "測試全形逗號設備",
+        custodianName: "陳小美",
     });
 });

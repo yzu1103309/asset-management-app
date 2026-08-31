@@ -5,6 +5,7 @@ import {PROPERTY_ITEMS_STORAGE_KEY} from "./propertyItemStore.ts";
 import {PROPERTY_STATUS_VALUES} from "./propertyStatusStore.ts";
 import {AREA_LAYOUT_STORAGE_KEY} from "./areaLayout.ts";
 import {PROPERTY_LABEL_QUEUE_STORAGE_KEY} from "./propertyLabelQueue.ts";
+import {PROPERTY_TEXT_SUGGESTIONS_STORAGE_KEY} from "./propertyTextSuggestions.ts";
 
 const PROPERTY_STATUS_STORAGE_KEY_PATTERN = new RegExp(`^\\d{3}_(${PROPERTY_STATUS_VALUES.join("|")})$`);
 
@@ -12,6 +13,7 @@ function isPropertyStorageKey(key: string): boolean {
     return key === PROPERTY_ITEMS_STORAGE_KEY
         || key === AREA_LAYOUT_STORAGE_KEY
         || key === PROPERTY_LABEL_QUEUE_STORAGE_KEY
+        || key === PROPERTY_TEXT_SUGGESTIONS_STORAGE_KEY
         || PROPERTY_STATUS_STORAGE_KEY_PATTERN.test(key);
 }
 

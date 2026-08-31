@@ -36,6 +36,7 @@ test("preserves existing field data when duplicate barcode entries are reimporte
                 itemNumber: "3",
                 barcode: "7654321-02-20001",
                 propertyName: "測試印表機",
+                custodianName: "舊保管人",
                 createdAt: "2026-01-01T00:00:00.000Z",
                 updatedAt: "2026-01-01T00:00:00.000Z",
                 sourceYears: ["114"],
@@ -68,6 +69,7 @@ test("preserves existing field data when duplicate barcode entries are reimporte
             itemNumber: "3",
             barcode: "7654321-02-20001",
             propertyName: "測試印表機",
+            custodianName: "新保管人",
         },
         {
             itemNumber: "4",
@@ -79,6 +81,7 @@ test("preserves existing field data when duplicate barcode entries are reimporte
     assert.equal(result.createdCount, 0);
     assert.equal(result.updatedCount, 2);
     assert.equal(result.items["7654321-02-20001"][0].note, "已貼標籤");
+    assert.equal(result.items["7654321-02-20001"][0].custodianName, "新保管人");
     assert.deepEqual(result.items["7654321-02-20001"][0].location, storedItems["7654321-02-20001"][0].location);
     assert.deepEqual(result.items["7654321-02-20001"][1].location, storedItems["7654321-02-20001"][1].location);
     assert.deepEqual(result.items["7654321-02-20001"].map((item) => item.sourceYears), [["114", "115"], ["114", "115"]]);

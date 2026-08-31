@@ -16,7 +16,7 @@ import {
 import {router, useFocusEffect, useLocalSearchParams} from "expo-router";
 import {Image as ExpoImage} from "expo-image";
 import * as ImagePicker from "expo-image-picker";
-import {Gesture, GestureDetector} from "react-native-gesture-handler";
+import {Gesture, GestureDetector, GestureHandlerRootView} from "react-native-gesture-handler";
 import Reanimated, {useAnimatedStyle, useSharedValue, withSpring} from "react-native-reanimated";
 import {useSafeAreaInsets} from "react-native-safe-area-context";
 import {Button, Div, Icon, Input, Text} from "react-native-magnus";
@@ -55,6 +55,11 @@ import {
     compressAndStorePropertyPhoto,
     removePropertyItemPhoto,
 } from "@/handlers/propertyItemPhotos";
+import {
+    getPropertyTextSuggestions,
+    getSuggestedPropertyTextSuggestions,
+    rememberPropertyTextSuggestion,
+} from "@/handlers/propertyTextSuggestions";
 
 function getParamValue(value: string | string[] | undefined): string | undefined {
     return Array.isArray(value) ? value[0] : value;
@@ -122,7 +127,7 @@ function AreaLayoutInlinePreview({
     editable,
     locked,
     showEditButton,
-    completionFeedbackAreaId,
+    completionFeedbackMessage,
     completionFeedbackKey,
     onRequestEditMode,
     onSelectArea,
@@ -134,7 +139,7 @@ function AreaLayoutInlinePreview({
     editable: boolean;
     locked: boolean;
     showEditButton: boolean;
-    completionFeedbackAreaId: string | null;
+    completionFeedbackMessage: string | null;
     completionFeedbackKey: number;
     onRequestEditMode: () => void;
     onSelectArea: (area: AreaLayoutArea | null) => void;
@@ -156,7 +161,7 @@ function AreaLayoutInlinePreview({
     }, [currentAreaId, currentAreaName, layout]);
 
     useEffect(() => {
-        if (!completionFeedbackAreaId) return;
+        if (!completionFeedbackMessage) return;
 
         completionOpacity.setValue(0);
         completionScale.setValue(0.86);
@@ -181,7 +186,7 @@ function AreaLayoutInlinePreview({
                 useNativeDriver: true,
             }),
         ]).start();
-    }, [completionFeedbackAreaId, completionFeedbackKey, completionOpacity, completionScale]);
+    }, [completionFeedbackKey, completionFeedbackMessage, completionOpacity, completionScale]);
 
     const displaySelectedAreaId = selectedAreaIdOverride !== undefined ? selectedAreaIdOverride : selectedAreaId;
     const selectedArea = useMemo(
@@ -217,6 +222,7 @@ function AreaLayoutInlinePreview({
     const showLockedLocationHint = () => {
         Alert.alert("位置區域已鎖定", "請先進入編輯模式，\n才能更改存放位置");
     };
+    const isClearLocationFeedback = completionFeedbackMessage === "已清除位置";
 
     return (
         <View style={styles.areaPreviewSection}>
@@ -303,22 +309,33 @@ function AreaLayoutInlinePreview({
                                 style={styles.areaLockedTouchOverlay}
                             />
                         )}
-                        {completionFeedbackAreaId && (
+                        {completionFeedbackMessage && (
                             <Animated.View
                                 pointerEvents="none"
                                 style={[
                                     styles.areaCompletionFeedback,
+                                    isClearLocationFeedback && styles.areaCompletionFeedbackInfo,
                                     {
                                         opacity: completionOpacity,
                                     },
                                 ]}
                             >
                                 <Animated.View style={[styles.areaCompletionContent, {transform: [{scale: completionScale}]}]}>
-                                    <View style={styles.areaCompletionBadge}>
-                                        <Icon name="check" fontFamily="Feather" color="#FFFFFF" fontSize="2xl" />
+                                    <View style={[styles.areaCompletionBadge, isClearLocationFeedback && styles.areaCompletionBadgeInfo]}>
+                                        <Icon
+                                            name={isClearLocationFeedback ? "info" : "check"}
+                                            fontFamily="AntDesign"
+                                            color="#FFFFFF"
+                                            fontSize="2xl"
+                                        />
                                     </View>
-                                    <Text mt="lg" color="gray800" fontSize="lg" fontWeight="bold">
-                                        已更新位置
+                                    <Text
+                                        mt="lg"
+                                        color={isClearLocationFeedback ? "#1E3A8A" : "gray800"}
+                                        fontSize="lg"
+                                        fontWeight="bold"
+                                    >
+                                        {completionFeedbackMessage}
                                     </Text>
                                 </Animated.View>
                             </Animated.View>
@@ -356,6 +373,7 @@ function DetailTextEditModal({
     target,
     saving,
     canEdit,
+    suggestions,
     onClose,
     onRequestEdit,
     onSave,
@@ -363,6 +381,7 @@ function DetailTextEditModal({
     target: EditingTarget | null;
     saving: boolean;
     canEdit: boolean;
+    suggestions: string[];
     onClose: () => void;
     onRequestEdit: (afterConfirmed: () => void) => void;
     onSave: (value: string) => void | Promise<void>;
@@ -373,6 +392,10 @@ function DetailTextEditModal({
     const inputHeight = Math.min(44 + Math.max(0, text.split("\n").length - 1) * 25, 220);
     const initialText = target?.value ?? "";
     const textChanged = text !== initialText;
+    const filteredSuggestions = useMemo(
+        () => getSuggestedPropertyTextSuggestions(text, suggestions),
+        [suggestions, text],
+    );
 
     useEffect(() => {
         if (!target) {
@@ -474,6 +497,30 @@ function DetailTextEditModal({
                                 mx="sm"
                                 mt="md"
                             />
+
+                            {filteredSuggestions.length > 0 && (
+                                <View style={styles.textSuggestionSection}>
+                                    <ScrollView
+                                        horizontal
+                                        showsHorizontalScrollIndicator={false}
+                                        contentContainerStyle={styles.textSuggestionList}
+                                        keyboardShouldPersistTaps="handled"
+                                    >
+                                        {filteredSuggestions.map((suggestion) => (
+                                            <TouchableOpacity
+                                                key={suggestion}
+                                                activeOpacity={0.78}
+                                                onPress={() => setText(suggestion)}
+                                                style={styles.textSuggestionChip}
+                                            >
+                                                <Text color="blue700" fontSize="sm" fontWeight="bold" numberOfLines={1}>
+                                                    {suggestion}
+                                                </Text>
+                                            </TouchableOpacity>
+                                        ))}
+                                    </ScrollView>
+                                </View>
+                            )}
 
                             <View style={styles.modalFooterRow}>
                                 <Button
@@ -697,36 +744,38 @@ function PropertyPhotoPreviewModal({
 
     return (
         <Modal visible={photo !== null} transparent animationType="fade" onRequestClose={onClose} onDismiss={() => setDisplayPhoto(null)}>
-            <Pressable style={styles.photoPreviewOverlay} onPress={onClose}>
-                <Pressable
-                    style={[styles.photoPreviewPanel, {width: Math.max(imageSize.width + 24, 230)}]}
-                    onPress={(event) => event.stopPropagation()}
-                >
-                    {activePhoto && (
-                        <ZoomablePhotoViewer uri={activePhoto.uri} imageSize={imageSize} />
-                    )}
-                    <View style={styles.photoPreviewActionsRow}>
-                        <TouchableOpacity activeOpacity={0.78} onPress={onDelete} style={[styles.photoPreviewActionButton, styles.photoPreviewDeleteButton]}>
-                            <Icon name="trash-2" fontFamily="Feather" color="#FFFFFF" fontSize="lg" mr="xs" />
-                            <Text color="#FFFFFF" fontSize="md" fontWeight="bold">刪除此照片</Text>
+            <GestureHandlerRootView style={styles.photoPreviewModalRoot}>
+                <Pressable style={styles.photoPreviewOverlay} onPress={onClose}>
+                    <Pressable
+                        style={[styles.photoPreviewPanel, {width: Math.max(imageSize.width + 24, 230)}]}
+                        onPress={(event) => event.stopPropagation()}
+                    >
+                        {activePhoto && (
+                            <ZoomablePhotoViewer uri={activePhoto.uri} imageSize={imageSize} />
+                        )}
+                        <View style={styles.photoPreviewActionsRow}>
+                            <TouchableOpacity activeOpacity={0.78} onPress={onDelete} style={[styles.photoPreviewActionButton, styles.photoPreviewDeleteButton]}>
+                                <Icon name="trash-2" fontFamily="Feather" color="#FFFFFF" fontSize="lg" mr="xs" />
+                                <Text color="#FFFFFF" fontSize="md" fontWeight="bold">刪除此照片</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                                activeOpacity={0.78}
+                                disabled={savingToLibrary}
+                                onPress={onSaveToLibrary}
+                                style={[styles.photoPreviewActionButton, styles.photoPreviewSaveButton, savingToLibrary && styles.photoPreviewActionButtonDisabled]}
+                            >
+                                <Icon name="download" fontFamily="Feather" color="#1D4ED8" fontSize="lg" mr="xs" />
+                                <Text color="#1D4ED8" fontSize="md" fontWeight="bold">
+                                    {savingToLibrary ? "儲存中" : "儲存至相簿"}
+                                </Text>
+                            </TouchableOpacity>
+                        </View>
+                        <TouchableOpacity activeOpacity={0.78} onPress={onClose} style={styles.photoPreviewCloseButton}>
+                            <Text color="gray700" fontSize="md" fontWeight="bold">關閉</Text>
                         </TouchableOpacity>
-                        <TouchableOpacity
-                            activeOpacity={0.78}
-                            disabled={savingToLibrary}
-                            onPress={onSaveToLibrary}
-                            style={[styles.photoPreviewActionButton, styles.photoPreviewSaveButton, savingToLibrary && styles.photoPreviewActionButtonDisabled]}
-                        >
-                            <Icon name="download" fontFamily="Feather" color="#1D4ED8" fontSize="lg" mr="xs" />
-                            <Text color="#1D4ED8" fontSize="md" fontWeight="bold">
-                                {savingToLibrary ? "儲存中" : "儲存至相簿"}
-                            </Text>
-                        </TouchableOpacity>
-                    </View>
-                    <TouchableOpacity activeOpacity={0.78} onPress={onClose} style={styles.photoPreviewCloseButton}>
-                        <Text color="gray700" fontSize="md" fontWeight="bold">關閉</Text>
-                    </TouchableOpacity>
+                    </Pressable>
                 </Pressable>
-            </Pressable>
+            </GestureHandlerRootView>
         </Modal>
     );
 }
@@ -783,7 +832,7 @@ function PropertyDetailBlock({
     locationEditMode,
     fieldsEditable,
     statusLocked,
-    completionFeedbackAreaId,
+    completionFeedbackMessage,
     completionFeedbackKey,
     onRequestEditMode,
     onAddPhoto,
@@ -802,7 +851,7 @@ function PropertyDetailBlock({
     locationEditMode: boolean;
     fieldsEditable: boolean;
     statusLocked: boolean;
-    completionFeedbackAreaId: string | null;
+    completionFeedbackMessage: string | null;
     completionFeedbackKey: number;
     onRequestEditMode: () => void;
     onAddPhoto: (item: PropertyItem, entityIndex: number) => void;
@@ -846,6 +895,12 @@ function PropertyDetailBlock({
                     <Text textAlign="center" color={statusColors.nameColor} fontWeight="bold" fontSize="md">目前狀態</Text>
                     <Text mt={4} textAlign="center" color={statusColors.barcodeColor} fontWeight="bold" fontSize="xl">{PROPERTY_STATUS_LABELS[status]}</Text>
                 </View>
+                <View style={[styles.summarySubCard, {backgroundColor: statusColors.cardBg}]}>
+                    <Text textAlign="center" color={statusColors.nameColor} fontWeight="bold" fontSize="md">保管人</Text>
+                    <Text mt={4} textAlign="center" color={statusColors.barcodeColor} fontWeight="bold" fontSize="xl" numberOfLines={1}>
+                        {item.custodianName?.trim() || "未提供"}
+                    </Text>
+                </View>
             </View>
             <View style={styles.detailCard}>
                 <AreaLayoutInlinePreview
@@ -856,7 +911,7 @@ function PropertyDetailBlock({
                     editable={fieldsEditable}
                     locked={statusLocked && !fieldsEditable}
                     showEditButton={statusLocked && !fieldsEditable}
-                    completionFeedbackAreaId={completionFeedbackAreaId}
+                    completionFeedbackMessage={completionFeedbackMessage}
                     completionFeedbackKey={completionFeedbackKey}
                     onRequestEditMode={onRequestEditMode}
                     onSelectArea={(area) => onSelectArea(item, index, area)}
@@ -967,9 +1022,10 @@ function EntitySelectionStep({
 export default function Details() {
     const insets = useSafeAreaInsets();
     const {showActionSheetWithOptions} = useSafeAreaActionSheet();
-    const params = useLocalSearchParams<{barcode?: string; serial?: string; entityIndex?: string; status?: string}>();
+    const params = useLocalSearchParams<{barcode?: string; serial?: string; entityIndex?: string; status?: string; year?: string}>();
     const barcode = useMemo(() => getParamValue(params.barcode) ?? getParamValue(params.serial), [params.barcode, params.serial]);
     const requestedEntityIndex = useMemo(() => parseEntityIndexParam(getParamValue(params.entityIndex)), [params.entityIndex]);
+    const requestedYear = useMemo(() => getParamValue(params.year), [params.year]);
     const [items, setItems] = useState<PropertyItem[]>([]);
     const [areaLayout, setAreaLayout] = useState<AreaLayout | null>(null);
     const [propertyStatus, setPropertyStatus] = useState<PropertyStatus>("unknown");
@@ -978,6 +1034,10 @@ export default function Details() {
     const [editingLockedFields, setEditingLockedFields] = useState(false);
     const [draftLocationArea, setDraftLocationArea] = useState<{id: string; name: string} | null>(null);
     const [editingTarget, setEditingTarget] = useState<EditingTarget | null>(null);
+    const [textSuggestions, setTextSuggestions] = useState<Record<PropertyItemEditableTextField, string[]>>({
+        locationDescription: [],
+        note: [],
+    });
     const [savingEditableText, setSavingEditableText] = useState(false);
     const [updatingStatus, setUpdatingStatus] = useState(false);
     const [updatingLocationArea, setUpdatingLocationArea] = useState(false);
@@ -987,8 +1047,7 @@ export default function Details() {
     const [selectedItemInPropertyLabelQueue, setSelectedItemInPropertyLabelQueue] = useState(false);
     const [loading, setLoading] = useState(true);
     const [statusLoading, setStatusLoading] = useState(true);
-    const [locationToastMessage, setLocationToastMessage] = useState<string | null>(null);
-    const [locationCompletionAreaId, setLocationCompletionAreaId] = useState<string | null>(null);
+    const [locationCompletionMessage, setLocationCompletionMessage] = useState<string | null>(null);
     const [locationCompletionKey, setLocationCompletionKey] = useState(0);
     const [previewingPhoto, setPreviewingPhoto] = useState<{
         item: PropertyItem;
@@ -1000,7 +1059,6 @@ export default function Details() {
         entityIndex: number;
     } | null>(null);
     const [photoSourceLaunchKey, setPhotoSourceLaunchKey] = useState(0);
-    const locationToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const locationCompletionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const pendingPhotoSourceRequestRef = useRef<{
         source: "camera" | "library";
@@ -1021,36 +1079,21 @@ export default function Details() {
     const showFixedActions = !pageLoading && !!selectedItem;
     const contentBottomPadding = showFixedActions ? Math.max(insets.bottom, 12) + 156 : Math.max(insets.bottom, 12) + 24;
 
-    const showLocationToast = (message: string) => {
-        if (locationToastTimerRef.current) {
-            clearTimeout(locationToastTimerRef.current);
-        }
-
-        setLocationToastMessage(message);
-        locationToastTimerRef.current = setTimeout(() => {
-            setLocationToastMessage(null);
-            locationToastTimerRef.current = null;
-        }, 1600);
-    };
-
-    const showLocationCompletion = (areaId: string) => {
+    const showLocationCompletion = (message = "已更新位置") => {
         if (locationCompletionTimerRef.current) {
             clearTimeout(locationCompletionTimerRef.current);
         }
 
-        setLocationCompletionAreaId(areaId);
+        setLocationCompletionMessage(message);
         setLocationCompletionKey((key) => key + 1);
         locationCompletionTimerRef.current = setTimeout(() => {
-            setLocationCompletionAreaId(null);
+            setLocationCompletionMessage(null);
             locationCompletionTimerRef.current = null;
         }, 1250);
     };
 
     useEffect(() => {
         return () => {
-            if (locationToastTimerRef.current) {
-                clearTimeout(locationToastTimerRef.current);
-            }
             if (locationCompletionTimerRef.current) {
                 clearTimeout(locationCompletionTimerRef.current);
             }
@@ -1115,7 +1158,8 @@ export default function Details() {
                         return;
                     }
 
-                    const years = [...new Set(statusLookupKey.split("|").flatMap((sourceYears) => sourceYears.split(",")).filter(Boolean))];
+                    const itemYears = [...new Set(statusLookupKey.split("|").flatMap((sourceYears) => sourceYears.split(",")).filter(Boolean))];
+                    const years = requestedYear && itemYears.includes(requestedYear) ? [requestedYear] : itemYears;
                     const nextEntityStatuses = Array<PropertyStatus>(items.length).fill("unknown");
                     const statusPrecedence: PropertyStatus[] = ["unknown", "pending", "checked"];
 
@@ -1150,7 +1194,7 @@ export default function Details() {
             return () => {
                 active = false;
             };
-        }, [barcode, items.length, selectedEntityIndex, statusLookupKey]),
+        }, [barcode, items.length, requestedYear, selectedEntityIndex, statusLookupKey]),
     );
 
     useEffect(() => {
@@ -1204,6 +1248,18 @@ export default function Details() {
         };
     }, [selectedItem?.barcode]);
 
+    const loadTextSuggestions = async (field: PropertyItemEditableTextField) => {
+        try {
+            const suggestions = await getPropertyTextSuggestions(field);
+            setTextSuggestions((currentSuggestions) => ({
+                ...currentSuggestions,
+                [field]: suggestions,
+            }));
+        } catch (error) {
+            console.error("讀取文字候選失敗:", error);
+        }
+    };
+
     const openTextEditor = (item: PropertyItem, entityIndex: number, field: PropertyItemEditableTextField) => {
         setEditingTarget({
             barcode: item.barcode,
@@ -1212,6 +1268,7 @@ export default function Details() {
             title: field === "locationDescription" ? "編輯詳細位置描述" : "編輯其他備註",
             value: field === "locationDescription" ? item.location.description ?? "" : item.note ?? "",
         });
+        void loadTextSuggestions(field);
     };
 
     const selectEntity = (entityIndex: number) => {
@@ -1223,6 +1280,7 @@ export default function Details() {
                 barcode,
                 entityIndex: String(entityIndex),
                 status: entityStatuses[entityIndex] ?? propertyStatus,
+                ...(requestedYear ? {year: requestedYear} : {}),
             },
         });
     };
@@ -1259,6 +1317,13 @@ export default function Details() {
                     ? updatedItem
                     : item
             )));
+            if (value.trim()) {
+                const nextSuggestions = await rememberPropertyTextSuggestion(editingTarget.field, value);
+                setTextSuggestions((currentSuggestions) => ({
+                    ...currentSuggestions,
+                    [editingTarget.field]: nextSuggestions,
+                }));
+            }
             setEditingTarget(null);
         } catch (error) {
             console.error("更新財產文字欄位失敗:", error);
@@ -1332,9 +1397,9 @@ export default function Details() {
             setEditingLockedFields(false);
             setDraftLocationArea(null);
             if (draftLocationArea) {
-                showLocationCompletion(draftLocationArea.id);
+                showLocationCompletion();
             } else {
-                showLocationToast("已清除位置");
+                showLocationCompletion("已清除位置");
             }
         } catch (error) {
             console.error("儲存位置區域失敗:", error);
@@ -1352,7 +1417,9 @@ export default function Details() {
             return;
         }
 
-        const year = getPrimarySourceYear(selectedItem);
+        const year = requestedYear && selectedItem.sourceYears.includes(requestedYear)
+            ? requestedYear
+            : getPrimarySourceYear(selectedItem);
         if (!year) {
             Alert.alert("無法更新狀態", "此財產沒有可用的匯入年度資料。");
             return;
@@ -1710,7 +1777,7 @@ export default function Details() {
                         locationEditMode={locationEditMode}
                         fieldsEditable={fieldsEditable}
                         statusLocked={statusLocked}
-                        completionFeedbackAreaId={locationCompletionAreaId}
+                        completionFeedbackMessage={locationCompletionMessage}
                         completionFeedbackKey={locationCompletionKey}
                         onRequestEditMode={() => requestEditMode()}
                         onAddPhoto={openAddPhotoMenu}
@@ -1725,6 +1792,7 @@ export default function Details() {
                 target={editingTarget}
                 saving={savingEditableText}
                 canEdit={fieldsEditable}
+                suggestions={editingTarget ? textSuggestions[editingTarget.field] : []}
                 onClose={() => setEditingTarget(null)}
                 onRequestEdit={requestTextEdit}
                 onSave={saveEditableText}
@@ -1749,21 +1817,6 @@ export default function Details() {
                 onCamera={() => queuePhotoSourceLaunch("camera")}
                 onLibrary={() => queuePhotoSourceLaunch("library")}
             />
-
-            {showFixedActions && locationToastMessage && (
-                <View
-                    pointerEvents="none"
-                    style={[
-                        styles.infoToast,
-                        {bottom: Math.max(insets.bottom, 12) + 152},
-                    ]}
-                >
-                    <Icon name="info" fontFamily="Feather" color="#2563EB" fontSize="lg" mr="sm" />
-                    <Text color="#1E3A8A" fontWeight="bold" fontSize="md">
-                        {locationToastMessage}
-                    </Text>
-                </View>
-            )}
 
             {showFixedActions && (
             <View style={[styles.fixedActions, {paddingBottom: Math.max(insets.bottom, 12)}]}>
@@ -1943,15 +1996,6 @@ const styles = StyleSheet.create({
     detailCard: {
         marginVertical: 12,
         padding: 5,
-        borderRadius: 16,
-        shadowColor: PROPERTY_STATUS_CARD_SHADOW_COLOR,
-        shadowOffset: {
-            width: 0,
-            height: 5,
-        },
-        shadowOpacity: 0.12,
-        shadowRadius: 12,
-        elevation: 4,
     },
     inlineEditButton: {
         flexDirection: "row",
@@ -2056,6 +2100,9 @@ const styles = StyleSheet.create({
     },
     addPhotoButtonDisabled: {
         opacity: 0.62,
+    },
+    photoPreviewModalRoot: {
+        flex: 1,
     },
     photoPreviewOverlay: {
         flex: 1,
@@ -2227,6 +2274,9 @@ const styles = StyleSheet.create({
         justifyContent: "center",
         backgroundColor: "rgba(187, 247, 208, 0.8)",
     },
+    areaCompletionFeedbackInfo: {
+        backgroundColor: "rgba(219, 234, 254, 0.84)",
+    },
     areaCompletionContent: {
         alignItems: "center",
         justifyContent: "center",
@@ -2240,6 +2290,9 @@ const styles = StyleSheet.create({
         backgroundColor: "#86D9A4",
         borderWidth: 2,
         borderColor: "#FFFFFF",
+    },
+    areaCompletionBadgeInfo: {
+        backgroundColor: "#60A5FA",
     },
     areaPreviewEmpty: {
         minHeight: 120,
@@ -2272,28 +2325,6 @@ const styles = StyleSheet.create({
         shadowOpacity: 0.08,
         shadowRadius: 12,
         elevation: 8,
-    },
-    infoToast: {
-        position: "absolute",
-        alignSelf: "center",
-        minHeight: 42,
-        maxWidth: "86%",
-        paddingHorizontal: 16,
-        paddingVertical: 10,
-        borderRadius: 999,
-        flexDirection: "row",
-        alignItems: "center",
-        backgroundColor: "#EFF6FF",
-        borderWidth: 1,
-        borderColor: "#BFDBFE",
-        shadowColor: PROPERTY_STATUS_CARD_SHADOW_COLOR,
-        shadowOffset: {
-            width: 0,
-            height: 4,
-        },
-        shadowOpacity: 0.12,
-        shadowRadius: 10,
-        elevation: 5,
     },
     modalOverlay: {
         flex: 1,
@@ -2330,6 +2361,26 @@ const styles = StyleSheet.create({
     },
     modalReadOnlyContent: {
         paddingBottom: 8,
+    },
+    textSuggestionSection: {
+        marginTop: 10,
+    },
+    textSuggestionList: {
+        gap: 8,
+        paddingHorizontal: 8,
+        paddingTop: 0,
+        paddingBottom: 2,
+    },
+    textSuggestionChip: {
+        maxWidth: 220,
+        minHeight: 34,
+        paddingHorizontal: 12,
+        borderRadius: 999,
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: "#EFF6FF",
+        borderWidth: 1,
+        borderColor: "#BFDBFE",
     },
     modalFooterRow: {
         width: "100%",

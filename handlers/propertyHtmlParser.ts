@@ -4,6 +4,7 @@ export type ParsedPropertyItem = {
     itemNumber: string;
     barcode: string;
     propertyName: string;
+    custodianName?: string | null;
 };
 
 export type PropertyHtmlParseResult = {
@@ -28,6 +29,10 @@ type TableCell = {
 type Big5TableChunk = readonly [string, ...(string | number)[]];
 
 const REQUIRED_HEADERS = ["itemNumber", "propertyNumber", "propertyName"] as const;
+
+type HeaderIndexes = Record<typeof REQUIRED_HEADERS[number], number> & {
+    custodianName?: number;
+};
 
 function decodeHtmlEntities(value: string): string {
     const namedEntities: Record<string, string> = {
@@ -181,21 +186,27 @@ function normalizeHeader(value: string): string {
     return value.replace(/[\s　]/g, "").replace(/[：:]/g, "").trim();
 }
 
-function getHeaderIndexes(row: string[]): Record<typeof REQUIRED_HEADERS[number], number> | null {
+function getHeaderIndexes(row: string[]): HeaderIndexes | null {
     const headers = row.map(normalizeHeader);
     const itemNumber = headers.findIndex((header) => header === "項次" || header === "序號");
     const propertyNumber = headers.findIndex((header) => header.includes("財產編號"));
     const propertyName = headers.findIndex((header) => header.includes("財產名稱"));
+    const custodianName = headers.findIndex((header) => header.includes("保管人"));
 
     if (itemNumber < 0 || propertyNumber < 0 || propertyName < 0) return null;
 
-    return {itemNumber, propertyNumber, propertyName};
+    return {
+        itemNumber,
+        propertyNumber,
+        propertyName,
+        ...(custodianName >= 0 ? {custodianName} : {}),
+    };
 }
 
-function extractRowsWithHeaders(html: string): Array<{ rows: string[][]; headerRowIndex: number; indexes: Record<typeof REQUIRED_HEADERS[number], number> }> {
+function extractRowsWithHeaders(html: string): Array<{ rows: string[][]; headerRowIndex: number; indexes: HeaderIndexes }> {
     const tablePattern = /<table\b[^>]*>([\s\S]*?)<\/table\s*>/gi;
     const tableCandidates: string[][][] = [];
-    const matches: Array<{ rows: string[][]; headerRowIndex: number; indexes: Record<typeof REQUIRED_HEADERS[number], number> }> = [];
+    const matches: Array<{ rows: string[][]; headerRowIndex: number; indexes: HeaderIndexes }> = [];
     let tableMatch: RegExpExecArray | null;
 
     while ((tableMatch = tablePattern.exec(html)) !== null) {
@@ -253,6 +264,9 @@ export function parsePropertyHtml(html: string): PropertyHtmlParseResult {
             const itemNumber = row[indexes.itemNumber]?.trim() ?? "";
             const sourcePropertyNumber = row[indexes.propertyNumber]?.trim() ?? "";
             const propertyName = row[indexes.propertyName]?.trim() ?? "";
+            const custodianName = indexes.custodianName !== undefined
+                ? row[indexes.custodianName]?.trim() || null
+                : undefined;
             const barcode = propertyNumberToBarcode(sourcePropertyNumber);
 
             if (!itemNumber && !sourcePropertyNumber && !propertyName) continue;
@@ -266,7 +280,12 @@ export function parsePropertyHtml(html: string): PropertyHtmlParseResult {
             }
 
             seenBarcodes.add(barcode);
-            items.push({itemNumber, barcode, propertyName});
+            items.push({
+                itemNumber,
+                barcode,
+                propertyName,
+                ...(indexes.custodianName !== undefined ? {custodianName} : {}),
+            });
         }
     }
 

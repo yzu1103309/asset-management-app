@@ -13,8 +13,9 @@ import {
 import {router} from "expo-router";
 import Modal from "react-native-modal";
 import {Icon, Input, Text} from "react-native-magnus";
-import AndroidKeyboardAvoidingView from "@/components/AndroidKeyboardAvoidingView";
+import {useSafeAreaInsets} from "react-native-safe-area-context";
 import {centeredEdgeToEdgeModalProps} from "@/constants/centeredModal";
+import {getBottomModalSafeAreaPadding} from "@/constants/bottomModalSafeArea";
 import ItemCard from "@/components/main/ItemCard";
 import {
     getAnnualPropertyItems,
@@ -36,6 +37,8 @@ function getLatestYear(years: string[]): string | null {
 }
 
 export default function SearchModal({visible, onClose, onNavigate}: SearchModalProps) {
+    const insets = useSafeAreaInsets();
+    const bottomModalSafeAreaPadding = getBottomModalSafeAreaPadding(insets.bottom);
     const [keyword, setKeyword] = useState("");
     const [items, setItems] = useState<AnnualPropertyListItem[]>([]);
     const [sourceYear, setSourceYear] = useState<string | null>(null);
@@ -169,9 +172,9 @@ export default function SearchModal({visible, onClose, onNavigate}: SearchModalP
             }}
             {...centeredEdgeToEdgeModalProps}
         >
-            <AndroidKeyboardAvoidingView style={styles.androidKeyboardAvoidingView}>
+            <View style={styles.androidKeyboardAvoidingView}>
                 <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
-                    <View style={styles.modalInnerContainer}>
+                    <View style={[styles.modalInnerContainer, {paddingBottom: 10 + bottomModalSafeAreaPadding}]}>
                         <View style={styles.header}>
                             <View style={styles.headerCopy}>
                                 <Text fontSize="2xl" fontWeight="bold" color="gray900">
@@ -256,12 +259,12 @@ export default function SearchModal({visible, onClose, onNavigate}: SearchModalP
                                 keyboardShouldPersistTaps="handled"
                                 showsVerticalScrollIndicator={false}
                                 style={styles.resultsList}
-                                contentContainerStyle={styles.resultsContent}
+                                contentContainerStyle={[styles.resultsContent, {paddingBottom: 20 + bottomModalSafeAreaPadding}]}
                             />
                         )}
                     </View>
                 </TouchableWithoutFeedback>
-            </AndroidKeyboardAvoidingView>
+            </View>
         </Modal>
     );
 }

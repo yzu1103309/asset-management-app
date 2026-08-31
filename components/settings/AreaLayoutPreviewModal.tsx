@@ -11,6 +11,8 @@ import {
 } from "react-native";
 import Modal from "react-native-modal";
 import {Button, Div, Icon, Input, Text} from "react-native-magnus";
+import {useSafeAreaInsets} from "react-native-safe-area-context";
+import {getBottomModalSafeAreaPadding} from "@/constants/bottomModalSafeArea";
 import {
     getAreaShapeFromStyle,
     isAreaDashedFromStyle,
@@ -34,6 +36,8 @@ function getAreaLabel(area: AreaLayoutArea): string {
 
 export default function AreaLayoutPreviewModal({visible, layout, onCancel, onConfirm}: AreaLayoutPreviewModalProps) {
     const {height: windowHeight} = useWindowDimensions();
+    const insets = useSafeAreaInsets();
+    const bottomModalSafeAreaPadding = getBottomModalSafeAreaPadding(insets.bottom);
     const previewMargin = 10;
     const [draftLayout, setDraftLayout] = useState<AreaLayout | null>(layout);
     const [selectedAreaId, setSelectedAreaId] = useState<string | null>(null);
@@ -149,7 +153,7 @@ export default function AreaLayoutPreviewModal({visible, layout, onCancel, onCon
                 style={styles.modal}
                 {...centeredEdgeToEdgeModalProps}
             >
-                    <View style={styles.panel}>
+                    <View style={[styles.panel, {paddingBottom: 24 + bottomModalSafeAreaPadding}]}>
                         <View style={styles.header}>
                             <View>
                                 <Text fontSize="xl" fontWeight="bold" color="gray900">預覽空間配置</Text>

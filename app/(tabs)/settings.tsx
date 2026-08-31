@@ -12,13 +12,20 @@ import {clearAllLocalData} from "@/handlers/clearDatabase";
 import {useSpinner} from "@/context/SpinnerContext";
 import {MenuRow, Section, SettingRow} from "@/components/settings/SettingsRows";
 import {File} from "expo-file-system";
-import {getStoredPropertyItems, importPropertyHtmlBytes} from "@/handlers/propertyImport";
+import {getStoredPropertyItems, importPropertyFileBytes} from "@/handlers/propertyImport";
+import {getPropertySpreadsheetSheetNames} from "@/handlers/propertySpreadsheetParser";
 import {getStoredAreaLayout, parseDrawioAreaLayout, saveAreaLayout, type AreaLayout} from "@/handlers/areaLayout";
 import {findMissingAreaLayoutBindings, type BoundAreaReference} from "@/handlers/areaLayoutCompatibility";
 import AreaLayoutPreviewModal from "@/components/settings/AreaLayoutPreviewModal";
 import {clearPropertyLabelQueue, getPropertyLabelQueue} from "@/handlers/propertyLabelQueue";
 import {getPropertyLabelPrintItems, type PropertyLabelPrintItem} from "@/handlers/propertyLabelPrintHtml";
 import {cleanupPropertyLabelPdf, createPropertyLabelPdf, sharePropertyLabelPdf, type PropertyLabelPdfExportResult} from "@/handlers/propertyLabelPdf";
+import {
+    cleanupPropertyExcelFile,
+    createPropertyExcelFile,
+    sharePropertyExcelFile,
+    type PropertyExcelExportResult,
+} from "@/handlers/propertyExcelExport";
 
 function getNestedValue(source: unknown, path: string[]): unknown {
     return path.reduce<unknown>((current, key) => {
@@ -75,6 +82,72 @@ function confirmAction(title: string, message: string, confirmText: string, dest
     });
 }
 
+function confirmPropertyImportWithoutAreaLayout(): Promise<boolean> {
+    return new Promise((resolve) => {
+        Alert.alert(
+            "尚未建立空間配置資訊",
+            "建議先匯入空間配置圖，\n再建立財產資料庫。\n\n必須有空間配置資訊才能進行盤點\n是否繼續操作？",
+            [
+                {
+                    text: "取消",
+                    style: "cancel",
+                    onPress: () => resolve(false),
+                },
+                {
+                    text: "仍要匯入",
+                    onPress: () => resolve(true),
+                },
+            ],
+            {cancelable: true, onDismiss: () => resolve(false)},
+        );
+    });
+}
+
+function isSpreadsheetImportSource(bytes: Uint8Array, sourceName?: string): boolean {
+    return /\.(xlsx|xls|xsl)$/i.test(sourceName?.toLowerCase() ?? "") || (bytes[0] === 0x50 && bytes[1] === 0x4b);
+}
+
+function spreadsheetSheetNameHasYear(sheetName: string): boolean {
+    return /(?:^|\D)(\d{3,4})(?:\D|$)/.test(sheetName);
+}
+
+function promptSpreadsheetSingleSheetYearSystem(now = new Date()): Promise<string | null> {
+    const westernYear = String(now.getFullYear());
+    const minguoYear = String(now.getFullYear() - 1911);
+
+    return new Promise((resolve) => {
+        Alert.alert(
+            "選擇匯入年度",
+            "這個 Excel 只有一個分頁，\n且分頁並非以年度命名。\n\n將自動套用目前年份",
+            [
+                {
+                    text: "取消",
+                    style: "cancel",
+                    onPress: () => resolve(null),
+                },
+                {
+                    text: `使用西元年（${westernYear}）`,
+                    onPress: () => resolve(westernYear),
+                },
+                {
+                    text: `使用民國年（${minguoYear}）`,
+                    onPress: () => resolve(minguoYear),
+                },
+            ],
+            {cancelable: true, onDismiss: () => resolve(null)},
+        );
+    });
+}
+
+async function resolveSpreadsheetSingleSheetFallbackYear(bytes: Uint8Array, sourceName?: string): Promise<string | undefined | null> {
+    if (!isSpreadsheetImportSource(bytes, sourceName)) return undefined;
+
+    const sheetNames = getPropertySpreadsheetSheetNames(bytes, sourceName);
+    if (sheetNames.length !== 1 || spreadsheetSheetNameHasYear(sheetNames[0])) return undefined;
+
+    return promptSpreadsheetSingleSheetYearSystem();
+}
+
 function getAreaReferenceLabel(reference: BoundAreaReference): string {
     return reference.areaName
         ? `${reference.areaName}${reference.areaId ? `（${reference.areaId}）` : ""}`
@@ -100,18 +173,30 @@ export default function Settings()
     };
 
     const handlePropertyImport = useCallback(async () => {
+        const currentAreaLayout = await getStoredAreaLayout().catch(() => null);
+        if (!currentAreaLayout && !(await confirmPropertyImportWithoutAreaLayout())) return;
+
         try {
-            showSpinner({locked: true});
-            const selectedFile = await File.pickFileAsync(undefined, "text/html");
+            const selectedFile = await File.pickFileAsync();
             const file = Array.isArray(selectedFile) ? selectedFile[0] : selectedFile;
 
             if (!file) return;
 
             // SDK 54 exposes `name` at runtime, but its inherited File type does not declare it.
             const sourceName = (file as File & {name?: string}).name;
-            const result = await importPropertyHtmlBytes(await file.bytes(), sourceName);
+            const fileBytes = await file.bytes();
+            const spreadsheetSingleSheetFallbackYear = await resolveSpreadsheetSingleSheetFallbackYear(fileBytes, sourceName);
+            if (spreadsheetSingleSheetFallbackYear === null) return;
+
+            showSpinner({locked: true});
+            const result = await importPropertyFileBytes(fileBytes, sourceName, {
+                spreadsheet: spreadsheetSingleSheetFallbackYear ? {singleSheetFallbackYear: spreadsheetSingleSheetFallbackYear} : undefined,
+            });
+            const sourceYearText = result.sourceYears.length === 1
+                ? `${result.sourceYears[0]} 年度`
+                : `${result.sourceYears.join(", ")} 年度`;
             const detail = [
-                `${result.sourceYear} 年度`,
+                sourceYearText,
                 `新增 ${result.createdCount} 筆`,
                 result.updatedCount > 0 ? `更新 ${result.updatedCount} 筆` : undefined,
                 // result.duplicateBarcodeCount > 0 ? `重複條碼 ${result.duplicateBarcodeCount} 筆已保留` : undefined,
@@ -417,6 +502,36 @@ export default function Settings()
         }
     }, [hideSpinner, showSpinner]);
 
+    const handlePropertyExcelExport = useCallback(async () => {
+        let exportedExcel: PropertyExcelExportResult | null = null;
+        let shouldCleanupExportedExcel = false;
+
+        try {
+            showSpinner({locked: true});
+            exportedExcel = await createPropertyExcelFile();
+            shouldCleanupExportedExcel = true;
+
+            const shared = await sharePropertyExcelFile(exportedExcel.uri);
+            shouldCleanupExportedExcel = shared;
+
+            if (!shared) {
+                Alert.alert(
+                    "Excel 檔已建立",
+                    `已匯出 ${exportedExcel.rowCount} 筆資料：\n${exportedExcel.fileName}\n${exportedExcel.uri}`,
+                );
+            }
+        } catch (error) {
+            const message = getErrorMessage(error) ?? "無法匯出 Excel 檔，請稍後再試。";
+            console.error("匯出 Excel 檔失敗:", error);
+            Alert.alert("匯出失敗", message);
+        } finally {
+            if (exportedExcel && shouldCleanupExportedExcel) {
+                cleanupPropertyExcelFile(exportedExcel);
+            }
+            hideSpinner({force: true});
+        }
+    }, [hideSpinner, showSpinner]);
+
     return (
         <View style={styles.container}>
             <View style={[styles.header, {paddingTop: insets.top + 18}]}>
@@ -482,7 +597,7 @@ export default function Settings()
                         icon="file-text"
                         iconFamily="Feather"
                         color="green500"
-                        onPress={showComingSoon}
+                        onPress={() => { void handlePropertyExcelExport(); }}
                     />
                 </Section>
 
