@@ -5,7 +5,7 @@ import TabBarIcon from "@/components/TabBarIcon";
 import { Platform } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-export default function () {
+export default function TabsLayout() {
     const { theme } = useTheme();
     const insets = useSafeAreaInsets();
 

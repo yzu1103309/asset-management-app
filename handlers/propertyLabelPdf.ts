@@ -2,13 +2,14 @@ import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
 import {Asset} from "expo-asset";
 import {File, Paths} from "expo-file-system";
-import {buildPropertyLabelPrintHtml, type PropertyLabelPrintItem} from "./propertyLabelPrintHtml.ts";
+import {buildPropertyLabelPrintHtmlAsync, type PropertyLabelPrintItem} from "./propertyLabelPrintHtml.ts";
 
 const A4_WIDTH_POINTS = 595.3;
 const A4_HEIGHT_POINTS = 841.9;
 const KAIU_FONT_MODULE = require("../assets/fonts/kaiu.ttf");
 const TIMES_FONT_MODULE = require("../assets/fonts/times.ttf");
 const PROPERTY_LABEL_PDF_FILE_PATTERN = /^財產標籤_(全部|待製作)_\d{8}-\d{6}\.pdf$/;
+const PROPERTY_LABEL_PROGRESS_MILLISECONDS_PER_PERCENT = 300;
 
 export type PropertyLabelPdfExportResult = {
     uri: string;
@@ -18,6 +19,14 @@ export type PropertyLabelPdfExportResult = {
 };
 
 export type PropertyLabelPdfKind = "全部" | "待製作";
+
+export type PropertyLabelPdfProgress = {
+    message: string;
+    progress: number;
+    targetProgress?: number;
+    millisecondsPerPercent?: number;
+    active?: boolean;
+};
 
 function padNumber(value: number): string {
     return String(value).padStart(2, "0");
@@ -39,6 +48,19 @@ function sanitizeFileName(value: string): string {
     return value.replace(/[\\/:*?"<>|]/g, "_");
 }
 
+function waitForProgressUiTick(): Promise<void> {
+    return new Promise<void>((resolve) => {
+        if (typeof requestAnimationFrame === "function") {
+            requestAnimationFrame(() => {
+                setTimeout(resolve, 0);
+            });
+            return;
+        }
+
+        setTimeout(resolve, 16);
+    });
+}
+
 export function getPropertyLabelPdfFileName(kind: PropertyLabelPdfKind, date = new Date()): string {
     return sanitizeFileName(`財產標籤_${kind}_${formatTimestamp(date)}.pdf`);
 }
@@ -46,15 +68,42 @@ export function getPropertyLabelPdfFileName(kind: PropertyLabelPdfKind, date = n
 export async function createPropertyLabelPdf(
     items: PropertyLabelPrintItem[],
     kind: PropertyLabelPdfKind,
+    onProgress?: (progress: PropertyLabelPdfProgress) => void,
 ): Promise<PropertyLabelPdfExportResult> {
+    onProgress?.({message: "清理舊標籤檔", progress: 5});
     cleanupStalePropertyLabelPdfs();
 
+    onProgress?.({
+        message: "載入標籤字型",
+        progress: 20,
+        targetProgress: 50,
+        millisecondsPerPercent: PROPERTY_LABEL_PROGRESS_MILLISECONDS_PER_PERCENT,
+        active: true,
+    });
+    await waitForProgressUiTick();
     const [kaiuFontDataUri, timesFontDataUri] = await Promise.all([
         getFontDataUri(KAIU_FONT_MODULE, "kaiu"),
         getFontDataUri(TIMES_FONT_MODULE, "times"),
     ]);
+    onProgress?.({
+        message: "產生標籤內容",
+        progress: 50,
+        targetProgress: 75,
+        millisecondsPerPercent: PROPERTY_LABEL_PROGRESS_MILLISECONDS_PER_PERCENT,
+        active: true,
+    });
+    await waitForProgressUiTick();
+    const html = await buildPropertyLabelPrintHtmlAsync(items, {kaiuFontDataUri, timesFontDataUri});
+    onProgress?.({
+        message: `產生 ${items.length} 張標籤 PDF`,
+        progress: 80,
+        targetProgress: 90,
+        millisecondsPerPercent: PROPERTY_LABEL_PROGRESS_MILLISECONDS_PER_PERCENT,
+        active: true,
+    });
+    await waitForProgressUiTick();
     const result = await Print.printToFileAsync({
-        html: buildPropertyLabelPrintHtml(items, {kaiuFontDataUri, timesFontDataUri}),
+        html,
         width: A4_WIDTH_POINTS,
         height: A4_HEIGHT_POINTS,
         margins: {
@@ -68,8 +117,10 @@ export async function createPropertyLabelPdf(
     const fileName = getPropertyLabelPdfFileName(kind);
     const namedFile = new File(Paths.cache, fileName);
 
+    onProgress?.({message: "整理輸出檔案", progress: 95});
     if (namedFile.exists) namedFile.delete();
     generatedFile.copy(namedFile);
+    onProgress?.({message: "PDF 建立完成", progress: 100});
 
     return {
         uri: namedFile.uri,

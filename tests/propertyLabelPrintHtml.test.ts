@@ -13,6 +13,7 @@ const storedItems: PropertyItemsByBarcode = {
             barcode: "3140101-03-40745",
             itemNumber: "2",
             propertyName: "測試螢幕",
+            custodianName: "陳小美",
             createdAt: "2026-08-16T00:00:00.000Z",
             updatedAt: "2026-08-16T00:00:00.000Z",
             sourceYears: ["115"],
@@ -25,6 +26,7 @@ const storedItems: PropertyItemsByBarcode = {
             barcode: "3140101-03-00427",
             itemNumber: "1",
             propertyName: "測試筆電",
+            custodianName: "王小明",
             createdAt: "2026-08-16T00:00:00.000Z",
             updatedAt: "2026-08-16T00:00:00.000Z",
             sourceYears: ["115"],
@@ -47,6 +49,7 @@ test("filters property label print items by queued barcode", () => {
             barcode: "3140101-03-40745",
             itemNumber: "2",
             propertyName: "測試螢幕",
+            custodianName: "陳小美",
         },
     ]);
 });
@@ -67,8 +70,12 @@ test("builds an A4 3 by 9 property label HTML page with QR code SVG", () => {
     assert.match(html, /grid-auto-rows: 3.3cm/);
     assert.match(html, /width: 1.5cm/);
     assert.match(html, /flex: 0 0 2.8em/);
+    assert.match(html, /-webkit-line-clamp: 2/);
+    assert.match(html, /\.label-row \+ \.label-row \{/);
     assert.equal((html.match(/<div class="label(?:\s|")/g) ?? []).length, 2);
     assert.match(html, /3140101-03-00427/);
+    assert.match(html, /保管人：[\s\S]*編號：[\s\S]*品名：/);
+    assert.match(html, /王小明/);
     assert.match(html, /<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg"/);
 });
 

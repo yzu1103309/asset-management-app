@@ -13,6 +13,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      EXPO_PUBLIC_ASTALOG_BACKUP_KEY: ${{ secrets.EXPO_PUBLIC_ASTALOG_BACKUP_KEY }}
     strategy:
       matrix:
         node: [22.x]

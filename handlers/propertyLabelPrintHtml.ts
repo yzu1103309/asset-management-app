@@ -2,7 +2,7 @@ import type {PropertyItem, PropertyItemsByBarcode} from "./propertyItemStore.ts"
 import VendorQRCodeModule from "qrcode-terminal/vendor/QRCode/index.js";
 import VendorQRErrorCorrectLevelModule from "qrcode-terminal/vendor/QRCode/QRErrorCorrectLevel.js";
 
-export type PropertyLabelPrintItem = Pick<PropertyItem, "barcode" | "itemNumber" | "propertyName">;
+export type PropertyLabelPrintItem = Pick<PropertyItem, "barcode" | "itemNumber" | "propertyName" | "custodianName">;
 type VendorQrCodeInstance = {
     addData: (data: string) => void;
     make: () => void;
@@ -42,6 +42,7 @@ export function getPropertyLabelPrintItems(
             barcode: item.barcode,
             itemNumber: item.itemNumber,
             propertyName: item.propertyName,
+            custodianName: item.custodianName ?? "",
         }));
 
     return items.sort((a, b) => compareItemNumber(a.itemNumber, b.itemNumber));
@@ -71,10 +72,14 @@ function renderLabel(item: PropertyLabelPrintItem): string {
             <div class="label-text">
                 <div class="label-title">盤點專用標籤</div>
                 <div class="label-row">
+                    <span class="label-field">保管人：</span>
+                    <span class="label-value">${escapeHtml(item.custodianName?.trim() || "")}</span>
+                </div>
+                <div class="label-row">
                     <span class="label-field">編號：</span>
                     <span class="label-value">${escapeHtml(item.barcode)}</span>
                 </div>
-                <div class="label-row label-name-row">
+                <div class="label-row">
                     <span class="label-field">品名：</span>
                     <span class="label-value label-name">${escapeHtml(item.propertyName)}</span>
                 </div>
@@ -84,11 +89,14 @@ function renderLabel(item: PropertyLabelPrintItem): string {
     `;
 }
 
-export function buildPropertyLabelPrintHtml(
-    items: PropertyLabelPrintItem[],
+function waitForHtmlBuildYield(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function buildPropertyLabelPrintHtmlDocument(
+    labelsHtml: string,
     options: {kaiuFontDataUri?: string | null; timesFontDataUri?: string | null} = {},
 ): string {
-    const labelsHtml = items.map(renderLabel).join("");
     const fontFaces = [
         options.timesFontDataUri
             ? `@font-face {
@@ -168,6 +176,9 @@ export function buildPropertyLabelPrintHtml(
             font-size: 9.2pt;
             line-height: 1.24;
         }
+        .label-row + .label-row {
+            margin-top: 0.08cm;
+        }
         .label-field {
             flex: 0 0 2.8em;
             white-space: nowrap;
@@ -176,13 +187,10 @@ export function buildPropertyLabelPrintHtml(
             min-width: 0;
             flex: 1;
         }
-        .label-name-row {
-            margin-top: 0.08cm;
-        }
         .label-name {
             display: -webkit-box;
             -webkit-box-orient: vertical;
-            -webkit-line-clamp: 3;
+            -webkit-line-clamp: 2;
             overflow: hidden;
             text-overflow: ellipsis;
         }
@@ -202,4 +210,27 @@ export function buildPropertyLabelPrintHtml(
 </head>
 <body><main class="sheet">${labelsHtml}</main></body>
 </html>`;
+}
+
+export function buildPropertyLabelPrintHtml(
+    items: PropertyLabelPrintItem[],
+    options: {kaiuFontDataUri?: string | null; timesFontDataUri?: string | null} = {},
+): string {
+    return buildPropertyLabelPrintHtmlDocument(items.map(renderLabel).join(""), options);
+}
+
+export async function buildPropertyLabelPrintHtmlAsync(
+    items: PropertyLabelPrintItem[],
+    options: {kaiuFontDataUri?: string | null; timesFontDataUri?: string | null} = {},
+): Promise<string> {
+    const labelsHtml: string[] = [];
+
+    for (let index = 0; index < items.length; index += 1) {
+        labelsHtml.push(renderLabel(items[index]));
+        if ((index + 1) % 8 === 0) await waitForHtmlBuildYield();
+    }
+
+    await waitForHtmlBuildYield();
+
+    return buildPropertyLabelPrintHtmlDocument(labelsHtml.join(""), options);
 }

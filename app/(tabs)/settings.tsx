@@ -19,13 +19,35 @@ import {findMissingAreaLayoutBindings, type BoundAreaReference} from "@/handlers
 import AreaLayoutPreviewModal from "@/components/settings/AreaLayoutPreviewModal";
 import {clearPropertyLabelQueue, getPropertyLabelQueue} from "@/handlers/propertyLabelQueue";
 import {getPropertyLabelPrintItems, type PropertyLabelPrintItem} from "@/handlers/propertyLabelPrintHtml";
-import {cleanupPropertyLabelPdf, createPropertyLabelPdf, sharePropertyLabelPdf, type PropertyLabelPdfExportResult} from "@/handlers/propertyLabelPdf";
+import {
+    cleanupPropertyLabelPdf,
+    createPropertyLabelPdf,
+    sharePropertyLabelPdf,
+    type PropertyLabelPdfExportResult,
+    type PropertyLabelPdfProgress,
+} from "@/handlers/propertyLabelPdf";
 import {
     cleanupPropertyExcelFile,
     createPropertyExcelFile,
     sharePropertyExcelFile,
     type PropertyExcelExportResult,
 } from "@/handlers/propertyExcelExport";
+import {
+    cleanupBackupFile,
+    createFullBackupFile,
+    getExistingBackupTargetSummary,
+    restoreFullBackupFile,
+    shareBackupFile,
+    type BackupExportResult,
+    type BackupProgress,
+} from "@/handlers/propertyBackup";
+
+type ProgressUpdate = BackupProgress | PropertyLabelPdfProgress;
+
+type ProgressOperation = ProgressUpdate & {
+    title: string;
+    completed?: boolean;
+};
 
 function getNestedValue(source: unknown, path: string[]): unknown {
     return path.reduce<unknown>((current, key) => {
@@ -167,10 +189,162 @@ export default function Settings()
     const [areaLayoutPreview, setAreaLayoutPreview] = useState<AreaLayout | null>(null);
     const [queuedLabelConfirmItems, setQueuedLabelConfirmItems] = useState<PropertyLabelPrintItem[] | null>(null);
     const [selectedQueuedLabelKeys, setSelectedQueuedLabelKeys] = useState<string[]>([]);
+    const [backupOperation, setBackupOperation] = useState<ProgressOperation | null>(null);
+    const [backupDisplayedProgress, setBackupDisplayedProgress] = useState(1);
+    const [backupProgressTrackWidth, setBackupProgressTrackWidth] = useState(0);
+    const backupSpinValue = useRef(new Animated.Value(0)).current;
+    const backupProgressValue = useRef(new Animated.Value(1)).current;
+    const backupProgressTextTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const backupProgressAnimationVersionRef = useRef(0);
+    const backupOperationVisible = backupOperation !== null;
+
+    useEffect(() => {
+        if (!backupOperationVisible) {
+            backupSpinValue.stopAnimation();
+            backupSpinValue.setValue(0);
+            return;
+        }
+
+        backupSpinValue.setValue(0);
+        const animation = Animated.loop(
+            Animated.timing(backupSpinValue, {
+                toValue: 1,
+                duration: 900,
+                easing: Easing.linear,
+                useNativeDriver: true,
+                isInteraction: false,
+            }),
+        );
+        animation.start();
+
+        return () => {
+            animation.stop();
+        };
+    }, [backupOperationVisible, backupSpinValue]);
+
+    const driveProgressBar = useCallback((progress: ProgressUpdate) => {
+        const animationVersion = backupProgressAnimationVersionRef.current + 1;
+        backupProgressAnimationVersionRef.current = animationVersion;
+        const targetProgress = Math.min(100, Math.max(1, progress.progress));
+        const activeTargetProgress = progress.targetProgress === undefined
+            ? targetProgress
+            : Math.min(100, Math.max(targetProgress, progress.targetProgress));
+        const activeMillisecondsPerPercent = progress.millisecondsPerPercent ?? 800;
+
+        backupProgressValue.stopAnimation((currentProgress) => {
+            if (animationVersion !== backupProgressAnimationVersionRef.current) return;
+
+            const current = Number(currentProgress);
+            const animateToProgress = (
+                nextProgress: number,
+                duration: number,
+                easing: (value: number) => number,
+                onDone?: () => void,
+            ) => {
+                Animated.timing(backupProgressValue, {
+                    toValue: nextProgress,
+                    duration,
+                    easing,
+                    useNativeDriver: true,
+                    isInteraction: false,
+                }).start(({finished}) => {
+                    if (finished && animationVersion === backupProgressAnimationVersionRef.current) onDone?.();
+                });
+            };
+
+            if (progress.active) {
+                const beginActiveProgress = Math.max(current, targetProgress);
+                const runActiveProgress = () => {
+                    const distance = Math.max(0, activeTargetProgress - beginActiveProgress);
+                    if (distance <= 0) return;
+                    animateToProgress(
+                        activeTargetProgress,
+                        distance * activeMillisecondsPerPercent,
+                        Easing.linear,
+                    );
+                };
+
+                if (current + 0.1 < targetProgress) {
+                    const catchUpDistance = targetProgress - current;
+                    animateToProgress(
+                        targetProgress,
+                        Math.max(220, Math.min(700, catchUpDistance * 55)),
+                        Easing.out(Easing.cubic),
+                        runActiveProgress,
+                    );
+                    return;
+                }
+
+                runActiveProgress();
+                return;
+            }
+
+            const nextProgress = Math.max(current, targetProgress);
+            const distance = Math.max(0, nextProgress - current);
+            animateToProgress(
+                nextProgress,
+                progress.progress >= 100
+                    ? Math.max(220, Math.min(520, distance * 45))
+                    : Math.max(220, Math.min(700, distance * 55)),
+                Easing.out(Easing.cubic),
+            );
+        });
+    }, [backupProgressValue]);
+
+    const clearProgressTextTimer = useCallback(() => {
+        if (backupProgressTextTimerRef.current) {
+            clearInterval(backupProgressTextTimerRef.current);
+            backupProgressTextTimerRef.current = null;
+        }
+    }, []);
+
+    const driveProgressText = useCallback((progress: ProgressUpdate) => {
+        clearProgressTextTimer();
+
+        const startProgress = Math.round(Math.min(100, Math.max(1, progress.progress)));
+        const targetProgress = Math.round(Math.min(100, Math.max(startProgress, progress.targetProgress ?? progress.progress)));
+
+        if (!progress.active) {
+            setBackupDisplayedProgress(startProgress);
+            return;
+        }
+
+        setBackupDisplayedProgress((current) => Math.max(current, startProgress));
+        backupProgressTextTimerRef.current = setInterval(() => {
+            setBackupDisplayedProgress((current) => {
+                if (current >= targetProgress) {
+                    clearProgressTextTimer();
+                    return targetProgress;
+                }
+
+                return Math.min(targetProgress, current + 1);
+            });
+        }, progress.millisecondsPerPercent ?? 800);
+    }, [clearProgressTextTimer]);
+
+    const resetProgressVisuals = useCallback(() => {
+        backupProgressAnimationVersionRef.current += 1;
+        backupProgressValue.stopAnimation();
+        backupProgressValue.setValue(1);
+        clearProgressTextTimer();
+        setBackupDisplayedProgress(1);
+    }, [backupProgressValue, clearProgressTextTimer]);
+
+    useEffect(() => {
+        if (!backupOperation) clearProgressTextTimer();
+    }, [backupOperation, clearProgressTextTimer]);
+
+    useEffect(() => () => clearProgressTextTimer(), [clearProgressTextTimer]);
 
     const showComingSoon = async () => {
         await inDevHandler();
     };
+
+    const updateProgressOperation = useCallback((title: string, progress: ProgressUpdate) => {
+        driveProgressBar(progress);
+        driveProgressText(progress);
+        setBackupOperation({title, ...progress, completed: progress.progress >= 100});
+    }, [driveProgressBar, driveProgressText]);
 
     const handlePropertyImport = useCallback(async () => {
         const currentAreaLayout = await getStoredAreaLayout().catch(() => null);
@@ -342,7 +516,6 @@ export default function Settings()
         let exported = false;
 
         try {
-            showSpinner({locked: true});
             if (labels.length === 0) {
                 Alert.alert("沒有可輸出的資料", mode === "queued"
                     ? "待製作清單中的財產編號找不到對應資料。"
@@ -350,13 +523,25 @@ export default function Settings()
                 return false;
             }
 
-            exportedPdf = await createPropertyLabelPdf(labels, mode === "queued" ? "待製作" : "全部");
+            const title = mode === "queued" ? "輸出待製作財產標籤" : "輸出所有財產標籤";
+            resetProgressVisuals();
+            setBackupOperation({title, message: "準備建立 PDF", progress: 1});
+            exportedPdf = await createPropertyLabelPdf(
+                labels,
+                mode === "queued" ? "待製作" : "全部",
+                (progress) => updateProgressOperation(title, progress),
+            );
             shouldCleanupExportedPdf = true;
+            clearProgressTextTimer();
+            setBackupDisplayedProgress(100);
+            setBackupOperation({title, message: "PDF 建立完成", progress: 100, completed: true});
+            await new Promise((resolve) => setTimeout(resolve, 520));
             const shared = await sharePropertyLabelPdf(
                 exportedPdf.uri,
-                mode === "queued" ? "輸出待製作財產標籤" : "輸出所有財產標籤",
+                title,
             );
             shouldCleanupExportedPdf = shared;
+            setBackupOperation(null);
 
             if (!shared) {
                 Alert.alert("PDF 已建立", `已建立 ${exportedPdf.numberOfPages} 頁 PDF：\n${exportedPdf.fileName}\n${exportedPdf.uri}`);
@@ -369,11 +554,11 @@ export default function Settings()
             if (exportedPdf && shouldCleanupExportedPdf) {
                 cleanupPropertyLabelPdf(exportedPdf);
             }
-            hideSpinner({force: true});
+            setBackupOperation(null);
         }
 
         return exported;
-    }, [hideSpinner, showSpinner]);
+    }, [clearProgressTextTimer, resetProgressVisuals, updateProgressOperation]);
 
     const handlePropertyLabelPdfExport = useCallback(async (mode: "all" | "queued") => {
         let labels: PropertyLabelPrintItem[] = [];
@@ -532,6 +717,113 @@ export default function Settings()
         }
     }, [hideSpinner, showSpinner]);
 
+    const handleBackupExport = useCallback(async () => {
+        let exportedBackup: BackupExportResult | null = null;
+        let shouldCleanupBackup = false;
+
+        try {
+            const summary = await getExistingBackupTargetSummary();
+            if (!summary.hasData) {
+                Alert.alert("無法匯出備份", "目前財產資料庫是空的，請先匯入或建立財產資料後再匯出備份。");
+                return;
+            }
+
+            resetProgressVisuals();
+            setBackupOperation({title: "匯出備份", message: "準備備份資料", progress: 1});
+            exportedBackup = await createFullBackupFile((progress) => updateProgressOperation("匯出備份", progress));
+            shouldCleanupBackup = true;
+            clearProgressTextTimer();
+            setBackupDisplayedProgress(100);
+            setBackupOperation({title: "匯出備份", message: "備份檔建立完成", progress: 100, completed: true});
+            await new Promise((resolve) => setTimeout(resolve, 520));
+
+            const shared = await shareBackupFile(exportedBackup.uri);
+            shouldCleanupBackup = shared;
+            setBackupOperation(null);
+
+            if (!shared) {
+                Alert.alert(
+                    "備份檔已建立",
+                    [
+                        `已匯出 ${exportedBackup.storageKeyCount} 筆資料與 ${exportedBackup.photoCount} 張照片。`,
+                        exportedBackup.encrypted ? "此備份已使用環境變數金鑰簡易加密。" : "未設定備份金鑰，內容僅做 base64 編碼與 hash 校驗。",
+                        "",
+                        exportedBackup.fileName,
+                        exportedBackup.uri,
+                    ].join("\n"),
+                );
+            }
+        } catch (error) {
+            const message = getErrorMessage(error) ?? "無法建立備份檔，請稍後再試。";
+            console.error("匯出備份失敗:", error);
+            Alert.alert("匯出失敗", message);
+        } finally {
+            if (exportedBackup && shouldCleanupBackup) cleanupBackupFile(exportedBackup.uri);
+            setBackupOperation(null);
+        }
+    }, [clearProgressTextTimer, resetProgressVisuals, updateProgressOperation]);
+
+    const confirmBackupRestoreOverwrite = useCallback(async (): Promise<boolean> => {
+        const summary = await getExistingBackupTargetSummary();
+        if (!summary.hasData) return true;
+
+        const selectedIndex = await showActionSheetAsync(
+            ["覆蓋現有資料並還原備份", "取消"],
+            {cancelButtonIndex: 1, destructiveButtonIndex: 0},
+        );
+        if (selectedIndex !== 0) return false;
+
+        return confirmAction(
+            "最後確認覆蓋",
+            [
+                "匯入備份會刪除目前本機資料\n並以備份檔內容取代。",
+                "",
+                "此操作無法復原。",
+            ].join("\n"),
+            "覆蓋並還原",
+            true,
+        );
+    }, [showActionSheetAsync]);
+
+    const handleBackupImport = useCallback(async () => {
+        try {
+            const selectedFile = await File.pickFileAsync();
+            const file = Array.isArray(selectedFile) ? selectedFile[0] : selectedFile;
+            if (!file) return;
+
+            if (!(await confirmBackupRestoreOverwrite())) return;
+
+            resetProgressVisuals();
+            setBackupOperation({title: "匯入備份", message: "準備讀取備份檔", progress: 1});
+            const result = await restoreFullBackupFile(file, (progress) => updateProgressOperation("匯入備份", progress));
+
+            Alert.alert(
+                "還原完成",
+                [
+                    `已還原所有資料。`,
+                    result.encrypted ? "通過加密備份校驗。" : "通過備份 hash 校驗。",
+                ].join("\n"),
+            );
+        } catch (error) {
+            const message = getErrorMessage(error) ?? "無法讀取或還原此備份檔。";
+            if (/cancel/i.test(message)) return;
+
+            console.error("匯入備份失敗:", error);
+            Alert.alert("匯入失敗", message);
+        } finally {
+            setBackupOperation(null);
+        }
+    }, [confirmBackupRestoreOverwrite, resetProgressVisuals, updateProgressOperation]);
+
+    const backupSpin = backupSpinValue.interpolate({
+        inputRange: [0, 1],
+        outputRange: ["0deg", "360deg"],
+    });
+    const backupProgressTranslateX = backupProgressValue.interpolate({
+        inputRange: [0, 100],
+        outputRange: [-(backupProgressTrackWidth || 320), 0],
+    });
+
     return (
         <View style={styles.container}>
             <View style={[styles.header, {paddingTop: insets.top + 18}]}>
@@ -604,19 +896,19 @@ export default function Settings()
                 <Section title="備份管理">
                     <MenuRow
                         title="匯出專用備份檔"
-                        description="將本機資料匯出為備份檔"
+                        description="匯出資料、清點狀態與照片"
                         icon="file-zip"
                         iconFamily="Octicons"
                         color="blue500"
-                        onPress={showComingSoon}
+                        onPress={() => { void handleBackupExport(); }}
                     />
                     <MenuRow
                         title="匯入備份檔"
-                        description="從備份檔還原資料"
+                        description="從備份檔完整還原資料與照片"
                         icon="file-symlink-file"
                         iconFamily="Octicons"
                         color="orange500"
-                        onPress={showComingSoon}
+                        onPress={() => { void handleBackupImport(); }}
                     />
                 </Section>
 
@@ -640,6 +932,53 @@ export default function Settings()
                     版本 {require("@/app.json").expo.version}
                 </Text>
             </ScrollView>
+            <Modal
+                visible={backupOperation !== null}
+                transparent
+                animationType="fade"
+            >
+                <View style={styles.centerModalBackdrop}>
+                    <View style={styles.backupProgressPanel}>
+                        {backupOperation && (
+                            <>
+                                {backupOperation.completed ? (
+                                    <View style={[styles.backupProgressIcon, styles.backupProgressIconCompleted]}>
+                                        <Icon name="check" fontFamily="Feather" fontSize={30} color="#16A34A" />
+                                    </View>
+                                ) : (
+                                    <Animated.View style={[styles.backupProgressIcon, {transform: [{rotate: backupSpin}]}]}>
+                                        <Icon name="refresh-cw" fontFamily="Feather" fontSize={28} color="#2563EB" />
+                                    </Animated.View>
+                                )}
+                                <Text mt={14} fontSize="xl" fontWeight="bold" color="gray900" textAlign="center">
+                                    {backupOperation.title}
+                                </Text>
+                                <Text mt={8} fontSize="md" color="gray700" textAlign="center" lineHeight={22}>
+                                    {backupOperation.message}
+                                </Text>
+                                {!backupOperation.completed && (
+                                    <>
+                                        <View
+                                            style={styles.backupProgressTrack}
+                                            onLayout={(event) => setBackupProgressTrackWidth(event.nativeEvent.layout.width)}
+                                        >
+                                            <Animated.View
+                                                style={[
+                                                    styles.backupProgressBar,
+                                                    {transform: [{translateX: backupProgressTranslateX}]},
+                                                ]}
+                                            />
+                                        </View>
+                                        <Text mt={8} fontSize="sm" color="gray600">
+                                            {backupDisplayedProgress}%
+                                        </Text>
+                                    </>
+                                )}
+                            </>
+                        )}
+                    </View>
+                </View>
+            </Modal>
             <AreaLayoutPreviewModal
                 visible={areaLayoutPreview !== null}
                 layout={areaLayoutPreview}
@@ -875,5 +1214,49 @@ const styles = StyleSheet.create({
     labelConfirmFooter: {
         flexDirection: "row",
         paddingTop: 12,
+    },
+    backupProgressPanel: {
+        width: "100%",
+        maxWidth: 360,
+        minHeight: 210,
+        alignItems: "center",
+        justifyContent: "center",
+        borderRadius: 16,
+        paddingHorizontal: 20,
+        paddingVertical: 24,
+        backgroundColor: "#FFFFFF",
+        shadowColor: "#475569",
+        shadowOffset: {
+            width: 0,
+            height: 8,
+        },
+        shadowOpacity: 0.16,
+        shadowRadius: 20,
+        elevation: 8,
+    },
+    backupProgressIcon: {
+        width: 56,
+        height: 56,
+        borderRadius: 28,
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: "#EFF6FF",
+    },
+    backupProgressIconCompleted: {
+        backgroundColor: "#DCFCE7",
+    },
+    backupProgressTrack: {
+        width: "100%",
+        height: 8,
+        marginTop: 16,
+        borderRadius: 4,
+        overflow: "hidden",
+        backgroundColor: "#E5E7EB",
+    },
+    backupProgressBar: {
+        width: "100%",
+        height: "100%",
+        borderRadius: 4,
+        backgroundColor: "#2563EB",
     },
 })
