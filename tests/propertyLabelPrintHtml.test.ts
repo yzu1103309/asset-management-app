@@ -54,6 +54,48 @@ test("filters property label print items by queued barcode", () => {
     ]);
 });
 
+test("filters all property label print items to latest-year entities", () => {
+    const items = getPropertyLabelPrintItems({
+        "A-001": [
+            {
+                barcode: "A-001",
+                itemNumber: "1",
+                itemNumbersByYear: {
+                    "114": "1",
+                    "115": "8",
+                },
+                propertyName: "最新年度仍存在",
+                custodianName: "王小明",
+                createdAt: "2026-08-16T00:00:00.000Z",
+                updatedAt: "2026-08-16T00:00:00.000Z",
+                sourceYears: ["114", "115"],
+                location: {areaId: null, areaName: null, description: null},
+                note: null,
+            },
+            {
+                barcode: "A-001",
+                itemNumber: "2",
+                propertyName: "舊年度已報廢",
+                custodianName: "王小明",
+                createdAt: "2026-08-16T00:00:00.000Z",
+                updatedAt: "2026-08-16T00:00:00.000Z",
+                sourceYears: ["114"],
+                location: {areaId: null, areaName: null, description: null},
+                note: null,
+            },
+        ],
+    }, undefined, {latestYearOnly: true});
+
+    assert.deepEqual(items, [
+        {
+            barcode: "A-001",
+            itemNumber: "8",
+            propertyName: "最新年度仍存在",
+            custodianName: "王小明",
+        },
+    ]);
+});
+
 test("builds an A4 3 by 9 property label HTML page with QR code SVG", () => {
     const html = buildPropertyLabelPrintHtml(getPropertyLabelPrintItems(storedItems), {
         kaiuFontDataUri: "data:font/truetype;base64,MOCK_KAIU_FONT",

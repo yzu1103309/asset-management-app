@@ -4,6 +4,7 @@ import {
     Alert,
     Animated,
     Easing,
+    FlatList,
     KeyboardAvoidingView,
     Modal,
     Platform,
@@ -17,13 +18,20 @@ import {
 import {router, useFocusEffect, useLocalSearchParams} from "expo-router";
 import {Image as ExpoImage} from "expo-image";
 import * as ImagePicker from "expo-image-picker";
+import {MenuView, type MenuAction, type NativeActionEvent} from "@expo/ui/community/menu";
 import {Gesture, GestureDetector, GestureHandlerRootView} from "react-native-gesture-handler";
 import Reanimated, {useAnimatedStyle, useSharedValue, withSpring} from "react-native-reanimated";
 import {useSafeAreaInsets} from "react-native-safe-area-context";
 import {Button, Div, Icon, Input, Text} from "react-native-magnus";
 import {getPropertyItemsByBarcode} from "@/handlers/propertyList";
 import type {PropertyItem} from "@/handlers/propertyImport";
-import type {PropertyPhoto} from "@/handlers/propertyItemStore";
+import {
+    getPropertyEntityKey,
+    getPropertyItemNumberForYear,
+    parsePropertyEntityKey,
+    type PropertyItemsByBarcode,
+    type PropertyPhoto,
+} from "@/handlers/propertyItemStore";
 import {
     getAreaShapeFromStyle,
     getStoredAreaLayout,
@@ -61,6 +69,22 @@ import {
     getSuggestedPropertyTextSuggestions,
     rememberPropertyTextSuggestion,
 } from "@/handlers/propertyTextSuggestions";
+import {usePropertyYear} from "@/context/PropertyYearContext";
+import {
+    comparePropertyYearsDescending,
+    isSamePropertyYear,
+    itemExistsInPropertyYear,
+    propertyYearToWesternNumber,
+} from "@/handlers/propertyYears";
+import {
+    addPropertyItemChild,
+    getRelationshipTargets,
+    getStoredRelationshipItemsByBarcode,
+    isPropertyRelationshipDescendant,
+    removePropertyItemChild,
+    setPropertyItemParent,
+    type PropertyRelationshipTarget,
+} from "@/handlers/propertyRelationships";
 
 function getParamValue(value: string | string[] | undefined): string | undefined {
     return Array.isArray(value) ? value[0] : value;
@@ -79,6 +103,13 @@ function getPrimarySourceYear(item: PropertyItem): string | null {
 
 const hitSlop = {top: 10, bottom: 10, left: 10, right: 10};
 const MAX_PROPERTY_PHOTO_COUNT = 3;
+const absoluteFill = {
+    position: "absolute" as const,
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+};
 
 function clamp(value: number, min: number, max: number): number {
     return Math.min(Math.max(value, min), max);
@@ -90,13 +121,61 @@ const PROPERTY_STATUS_LABELS: Record<PropertyStatus, string> = {
     pending: "待處理",
 };
 
-function EditableDetailRow({label, value, onPress}: {label: string; value: string | null | undefined; onPress: () => void}) {
+function getPropertyRelationshipShortLabel(target: PropertyRelationshipTarget | null, fallbackKey?: string | null): string {
+    if (!target) return fallbackKey ? `找不到資料：${fallbackKey}` : "（未設定）";
+
+    return `${target.item.propertyName}\n（${target.barcode}）`;
+}
+
+function propertyRelationshipExistsInYear(target: PropertyRelationshipTarget | null, year: string | null): boolean {
+    if (!target) return false;
+    if (!year) return true;
+
+    return itemExistsInPropertyYear(target.item.sourceYears, year);
+}
+
+function getPropertyRelationshipYearStatusLabel(target: PropertyRelationshipTarget | null, year: string | null): string | null {
+    if (!target || !year || itemExistsInPropertyYear(target.item.sourceYears, year)) return null;
+
+    const viewingWesternYear = propertyYearToWesternNumber(year);
+    const sourceWesternYears = target.item.sourceYears
+        .map(propertyYearToWesternNumber)
+        .filter((sourceYear): sourceYear is number => sourceYear !== null);
+
+    return viewingWesternYear !== null && sourceWesternYears.some((sourceYear) => sourceYear > viewingWesternYear)
+        ? "後續新增"
+        : "可能已報廢";
+}
+
+function EditableDetailRow({
+    label,
+    value,
+    editable = true,
+    onPress,
+}: {
+    label: string;
+    value: string | null | undefined;
+    editable?: boolean;
+    onPress: () => void;
+}) {
+    const content = (
+        <View style={styles.editableDetailText}>
+            <Text fontSize="md" color="gray600" style={styles.detailLabel}>{label}</Text>
+            <Text fontSize="lg" color="gray900" style={styles.detailValue}>{value || "（未填寫）"}</Text>
+        </View>
+    );
+
+    if (!editable) {
+        return (
+            <View style={styles.detailRow}>
+                {content}
+            </View>
+        );
+    }
+
     return (
         <TouchableOpacity activeOpacity={0.75} onPress={onPress} style={[styles.detailRow, styles.editableDetailRow]}>
-            <View style={styles.editableDetailText}>
-                <Text fontSize="md" color="gray600" style={styles.detailLabel}>{label}</Text>
-                <Text fontSize="lg" color="gray900" style={styles.detailValue}>{value || "（未填寫）"}</Text>
-            </View>
+            {content}
             <Icon name="edit-2" fontFamily="Feather" fontSize="lg" color="gray500" ml="sm" />
         </TouchableOpacity>
     );
@@ -479,12 +558,19 @@ function DetailTextEditModal({
             >
                 <View style={styles.modalInnerContainer}>
                     <View style={styles.modalHeaderRow}>
-                        <Text fontSize="xl" color="gray800" fontWeight="bold">
+                        <Text fontSize="xl" color="gray800" fontWeight="bold" style={styles.modalHeaderTitle} numberOfLines={2}>
                             {target?.title ?? "編輯"}
                         </Text>
                         {isEditing ? (
                             <View style={styles.modalHeaderActions}>
-                                <Text fontSize="lg" color={text.length >= limit ? "red600" : "gray600"}>
+                                <Text
+                                    fontSize="lg"
+                                    color={text.length >= limit ? "red600" : "gray600"}
+                                    style={styles.modalCharacterCount}
+                                    numberOfLines={1}
+                                    adjustsFontSizeToFit
+                                    minimumFontScale={0.82}
+                                >
                                     {text.length}/{limit}
                                 </Text>
                                 <TouchableOpacity onPress={confirmClearText} hitSlop={hitSlop} disabled={saving || text.length === 0}>
@@ -804,52 +890,432 @@ function PropertyPhotoPreviewModal({
     );
 }
 
-function PhotoSourceModal({
-    visible,
+function PhotoSourceMenu({
     addingPhoto,
-    onClose,
-    onCamera,
-    onLibrary,
+    children,
+    onSelect,
 }: {
-    visible: boolean;
     addingPhoto: boolean;
-    onClose: () => void;
-    onCamera: () => void;
-    onLibrary: () => void;
+    children: React.ReactNode;
+    onSelect: (source: "camera" | "library") => void;
 }) {
+    const actions = useMemo<MenuAction[]>(() => [
+        {
+            id: "camera",
+            title: "拍照",
+            image: "camera",
+            attributes: addingPhoto ? {disabled: true} : undefined,
+        },
+        {
+            id: "library",
+            title: "從圖庫選擇",
+            image: "photo.on.rectangle",
+            attributes: addingPhoto ? {disabled: true} : undefined,
+        },
+    ], [addingPhoto]);
+    const handlePressAction = useCallback((event: NativeActionEvent) => {
+        const source = event.nativeEvent.event;
+        if (source !== "camera" && source !== "library") return;
+
+        onSelect(source);
+    }, [onSelect]);
+
     return (
-        <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-            <View style={styles.photoSourceOverlay}>
-                <View style={styles.photoSourcePanel}>
-                    <Text fontSize="xl" fontWeight="bold" color="gray900" textAlign="center">
-                        新增照片
+        <MenuView title="新增照片" actions={actions} onPressAction={handlePressAction}>
+            {children}
+        </MenuView>
+    );
+}
+
+function DetailYearMenu({
+    years,
+    selectedYear,
+    onSelect,
+}: {
+    years: string[];
+    selectedYear: string | null;
+    onSelect: (year: string) => void;
+}) {
+    const actions = useMemo<MenuAction[]>(() => (
+        years.map((year) => ({
+            id: year,
+            title: `${year} 年度`,
+            titleColor: "#2563EB",
+            state: selectedYear && isSamePropertyYear(year, selectedYear) ? "on" : undefined,
+        }))
+    ), [selectedYear, years]);
+    const handlePressAction = useCallback((event: NativeActionEvent) => {
+        onSelect(event.nativeEvent.event);
+    }, [onSelect]);
+
+    if (years.length === 0 || !selectedYear) return null;
+
+    return (
+        <MenuView title="查看盤點狀態年度" actions={actions} onPressAction={handlePressAction}>
+            <View style={styles.detailYearTrigger}>
+                <Text color="#2563EB" fontSize="sm" fontWeight="bold">
+                    {selectedYear} 年度
+                </Text>
+                <Icon name="chevron-down" fontFamily="Feather" color="#2563EB" fontSize={14} ml={2} />
+            </View>
+        </MenuView>
+    );
+}
+
+type DetailEntityMenuOption = {
+    id: string;
+    title: string;
+};
+
+function DetailEntityMenu({
+    index,
+    total,
+    options,
+    onSelect,
+}: {
+    index: number;
+    total: number;
+    options: DetailEntityMenuOption[];
+    onSelect: (index: number) => void;
+}) {
+    const actions = useMemo<MenuAction[]>(() => (
+        options.map((option, optionIndex) => ({
+            id: option.id,
+            title: option.title,
+            titleColor: "#2563EB",
+            state: optionIndex === index ? "on" : undefined,
+        }))
+    ), [index, options]);
+    const handlePressAction = useCallback((event: NativeActionEvent) => {
+        const nextIndex = Number(event.nativeEvent.event);
+        if (!Number.isInteger(nextIndex)) return;
+
+        onSelect(nextIndex);
+    }, [onSelect]);
+
+    if (total <= 1) return null;
+
+    return (
+        <View style={styles.detailEntityMenuHost}>
+            <MenuView title="選擇實體" actions={actions} onPressAction={handlePressAction}>
+                <View style={styles.detailEntityTrigger}>
+                    <Text textAlign="center" color="gray600" fontWeight="bold" fontSize="sm">
+                        實體 {index + 1} / {total}
                     </Text>
-                    <Text mt={6} mb={16} fontSize="md" color="gray600" textAlign="center">
-                        選擇照片來源
-                    </Text>
-                    <TouchableOpacity activeOpacity={0.78} disabled={addingPhoto} onPress={onCamera} style={styles.photoSourceOption}>
-                        <Icon name="camera-outline" fontFamily="Ionicons" color="#2563EB" fontSize="xl" mr="md" />
-                        <Text color="gray900" fontSize="lg" fontWeight="bold">拍照</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity activeOpacity={0.78} disabled={addingPhoto} onPress={onLibrary} style={styles.photoSourceOption}>
-                        <Icon name="images-outline" fontFamily="Ionicons" color="#2563EB" fontSize="xl" mr="md" />
-                        <Text color="gray900" fontSize="lg" fontWeight="bold">從圖庫選擇</Text>
-                    </TouchableOpacity>
-                    <Button block mt="md" bg="gray200" color="gray800" rounded={12} onPress={onClose} disabled={addingPhoto}>
-                        取消
-                    </Button>
+                    <Icon name="chevron-down" fontFamily="Feather" color="gray600" fontSize={14} ml={3} />
+                </View>
+            </MenuView>
+        </View>
+    );
+}
+
+type RelationshipPickerMode = "parent" | "child";
+
+type RelationshipPickerState = {
+    mode: RelationshipPickerMode;
+    title: string;
+    targets: PropertyRelationshipTarget[];
+};
+
+function RelationshipPickerModal({
+    state,
+    year,
+    onClose,
+    onSelect,
+}: {
+    state: RelationshipPickerState | null;
+    year: string | null;
+    onClose: () => void;
+    onSelect: (target: PropertyRelationshipTarget) => void;
+}) {
+    const [keyword, setKeyword] = useState("");
+    const visible = state !== null;
+    const normalizedKeyword = keyword.trim().toLowerCase();
+    const pickerTargets = state?.targets;
+    const filteredTargets = useMemo(() => {
+        const targets = pickerTargets ?? [];
+        if (!normalizedKeyword) return targets;
+
+        return targets.filter((target) => {
+            const itemNumber = getPropertyItemNumberForYear(target.item, year);
+            return [
+                target.barcode,
+                itemNumber,
+                target.item.propertyName,
+                target.item.custodianName ?? "",
+            ].some((value) => value.toLowerCase().includes(normalizedKeyword));
+        });
+    }, [normalizedKeyword, pickerTargets, year]);
+    const closePicker = () => {
+        setKeyword("");
+        onClose();
+    };
+    const selectTarget = (target: PropertyRelationshipTarget) => {
+        setKeyword("");
+        onSelect(target);
+    };
+
+    return (
+        <Modal visible={visible} transparent animationType="fade" onRequestClose={closePicker}>
+            <View style={styles.modalOverlay}>
+                <View style={[styles.modalInnerContainer, styles.relationshipPickerContainer]}>
+                    <View style={styles.modalHeaderRow}>
+                        <Text fontSize="xl" color="gray800" fontWeight="bold" style={styles.modalHeaderTitle} numberOfLines={2}>
+                            {state?.title ?? "選擇財產"}
+                        </Text>
+                        <TouchableOpacity onPress={closePicker} hitSlop={hitSlop}>
+                            <Icon name="close" color="gray700" fontSize="2xl" fontFamily="AntDesign" />
+                        </TouchableOpacity>
+                    </View>
+                    <Input
+                        value={keyword}
+                        onChangeText={setKeyword}
+                        mt="md"
+                        mb="sm"
+                        px="lg"
+                        rounded={12}
+                        borderColor="gray300"
+                        fontSize="md"
+                        placeholder="搜尋品名、財產編號、項次或保管人"
+                        prefix={<Icon name="search" fontFamily="Feather" color="gray500" fontSize="lg" mr="sm" />}
+                    />
+                    <FlatList
+                        data={filteredTargets}
+                        keyExtractor={(target) => target.entityKey}
+                        keyboardShouldPersistTaps="handled"
+                        style={styles.relationshipPickerList}
+                        contentContainerStyle={filteredTargets.length === 0 ? styles.relationshipPickerEmptyContent : styles.relationshipPickerContent}
+                        renderItem={({item: target}) => (
+                            <TouchableOpacity
+                                activeOpacity={0.78}
+                                onPress={() => selectTarget(target)}
+                                style={styles.relationshipCandidateRow}
+                            >
+                                <View style={styles.relationshipCandidateText}>
+                                    <Text color="gray900" fontWeight="bold" fontSize="md" numberOfLines={1}>
+                                        {target.barcode}
+                                    </Text>
+                                    <Text mt={3} color="gray600" fontSize="sm" numberOfLines={1}>
+                                        {target.item.propertyName}
+                                    </Text>
+                                </View>
+                                <Icon name="chevron-right" fontFamily="Feather" color="gray500" fontSize="xl" />
+                            </TouchableOpacity>
+                        )}
+                        ListEmptyComponent={(
+                            <View style={styles.relationshipPickerEmpty}>
+                                <Text color="gray600" fontSize="md" textAlign="center">
+                                    {keyword.trim() ? "沒有符合條件的財產實體" : "沒有可選擇的財產實體"}
+                                </Text>
+                            </View>
+                        )}
+                    />
                 </View>
             </View>
         </Modal>
     );
 }
 
+function RelationshipItemCard({
+    target,
+    fallbackKey,
+    year,
+    actionIcon,
+    actionDestructive = false,
+    onPress,
+    onActionPress,
+}: {
+    target: PropertyRelationshipTarget | null;
+    fallbackKey?: string | null;
+    year: string | null;
+    actionIcon?: string;
+    actionDestructive?: boolean;
+    onPress: () => void;
+    onActionPress?: () => void;
+}) {
+    const existsInYear = propertyRelationshipExistsInYear(target, year);
+    const yearStatusLabel = getPropertyRelationshipYearStatusLabel(target, year);
+    const backgroundColor = existsInYear ? "#F8FAFC" : "#FFFBEB";
+    const borderColor = existsInYear ? "#CBD5E1" : "#FDE68A";
+    const barcodeText = target
+        ? `${target.barcode}${yearStatusLabel ? `（${yearStatusLabel}）` : ""}`
+        : fallbackKey ?? "找不到財產資料";
+    const propertyNameText = target?.item.propertyName ?? "此關係指向的財產資料不存在";
+
+    return (
+        <Pressable onPress={onPress}>
+            {({pressed}) => (
+                <View
+                    style={[
+                        styles.relationshipItemCard,
+                        {
+                            backgroundColor,
+                            borderColor,
+                            shadowColor: PROPERTY_STATUS_CARD_SHADOW_COLOR,
+                        },
+                    ]}
+                >
+                    <View style={styles.relationshipItemContent}>
+                        <Text mb={2} fontSize={12} color="gray900" numberOfLines={1}>
+                            {barcodeText}
+                        </Text>
+                        <Text mt={2} fontSize={14} fontWeight="bold" color="gray700" lineHeight={19} numberOfLines={1}>
+                            {propertyNameText}
+                        </Text>
+                    </View>
+                    {actionIcon && onActionPress && (
+                        <TouchableOpacity
+                            activeOpacity={0.78}
+                            onPress={onActionPress}
+                            style={[
+                                styles.relationshipCardIconButton,
+                                actionDestructive && styles.relationshipCardIconButtonDestructive,
+                            ]}
+                        >
+                            <Icon
+                                name={actionIcon}
+                                fontFamily="Feather"
+                                color={actionDestructive ? "#DC2626" : "#1D4ED8"}
+                                fontSize="lg"
+                            />
+                        </TouchableOpacity>
+                    )}
+                    {pressed && <View pointerEvents="none" style={styles.relationshipPressedOverlay} />}
+                </View>
+            )}
+        </Pressable>
+    );
+}
+
+function RelationshipPlaceholderButton({
+    title,
+    icon,
+    disabled,
+    onPress,
+}: {
+    title: string;
+    icon: string;
+    disabled: boolean;
+    onPress: () => void;
+}) {
+    return (
+        <TouchableOpacity
+            activeOpacity={0.78}
+            disabled={disabled}
+            onPress={onPress}
+            style={[styles.relationshipPlaceholderButton, disabled && styles.relationshipButtonDisabled]}
+        >
+            <Icon name={icon} fontFamily="Feather" color="gray800" fontSize="md" mr="xs" />
+            <Text color="gray800" fontSize="md" fontWeight="bold">{title}</Text>
+        </TouchableOpacity>
+    );
+}
+
+function PropertyRelationshipSection({
+    item,
+    entityIndex,
+    targets,
+    year,
+    disabled,
+    onOpenParentPicker,
+    onOpenChildPicker,
+    onClearParent,
+    onRemoveChild,
+    onOpenTarget,
+}: {
+    item: PropertyItem;
+    entityIndex: number;
+    targets: PropertyRelationshipTarget[];
+    year: string | null;
+    disabled: boolean;
+    onOpenParentPicker: () => void;
+    onOpenChildPicker: () => void;
+    onClearParent: () => void;
+    onRemoveChild: (childEntityKey: string) => void;
+    onOpenTarget: (target: PropertyRelationshipTarget | null, fallbackKey?: string | null) => void;
+}) {
+    const currentEntityKey = getPropertyEntityKey(item.barcode, entityIndex);
+    const targetByKey = useMemo(() => new Map(targets.map((target) => [target.entityKey, target])), [targets]);
+    const parentTarget = item.parentEntityKey ? targetByKey.get(item.parentEntityKey) ?? null : null;
+    const childEntityKeys = [...new Set((item.childEntityKeys ?? []).filter((key) => (
+        key !== currentEntityKey && parsePropertyEntityKey(key) !== null
+    )))];
+
+    return (
+        <View style={styles.relationshipSection}>
+            <View style={styles.relationshipFieldRow}>
+                <View style={styles.relationshipFieldHeader}>
+                    <Text fontSize="md" color="gray600" style={styles.detailLabel}>附屬於</Text>
+                </View>
+                {item.parentEntityKey ? (
+                    <RelationshipItemCard
+                        target={parentTarget}
+                        fallbackKey={item.parentEntityKey}
+                        year={year}
+                        actionIcon="x"
+                        actionDestructive
+                        onPress={() => onOpenTarget(parentTarget, item.parentEntityKey)}
+                        onActionPress={onClearParent}
+                    />
+                ) : (
+                    <RelationshipPlaceholderButton
+                        title="設定上層關聯"
+                        icon="git-merge"
+                        disabled={disabled}
+                        onPress={onOpenParentPicker}
+                    />
+                )}
+            </View>
+            <View style={styles.relationshipFieldRow}>
+                <View style={styles.relationshipFieldHeader}>
+                    <Text fontSize="md" color="gray600" style={styles.detailLabel}>附屬財產</Text>
+                </View>
+                {childEntityKeys.length === 0 ? (
+                    <RelationshipPlaceholderButton
+                        title="新增下層附屬財產"
+                        icon="plus"
+                        disabled={disabled}
+                        onPress={onOpenChildPicker}
+                    />
+                ) : (
+                    <>
+                        {childEntityKeys.map((childEntityKey) => {
+                            const childTarget = targetByKey.get(childEntityKey) ?? null;
+
+                            return (
+                                <RelationshipItemCard
+                                    key={childEntityKey}
+                                    target={childTarget}
+                                    fallbackKey={childEntityKey}
+                                    year={year}
+                                    actionIcon="trash-2"
+                                    actionDestructive
+                                    onPress={() => onOpenTarget(childTarget, childEntityKey)}
+                                    onActionPress={() => onRemoveChild(childEntityKey)}
+                                />
+                            );
+                        })}
+                        <RelationshipPlaceholderButton
+                            title="新增下層附屬財產"
+                            icon="plus"
+                            disabled={disabled}
+                            onPress={onOpenChildPicker}
+                        />
+                    </>
+                )}
+            </View>
+        </View>
+    );
+}
+
 function PropertyDetailBlock({
     item,
     index,
+    actualEntityIndex,
     total,
     areaLayout,
     status,
+    year,
     onEditText,
     onSelectArea,
     draftLocationArea,
@@ -863,12 +1329,25 @@ function PropertyDetailBlock({
     onPreviewPhoto,
     onPhotoOptions,
     addingPhoto,
+    relationshipTargets,
+    relationshipDisabled,
+    onOpenParentPicker,
+    onOpenChildPicker,
+    onClearParent,
+    onRemoveChild,
+    onOpenRelationshipTarget,
+    summaryOnly = false,
+    statusTitle = "目前狀態",
+    entityOptions = [],
+    onSelectEntity,
 }: {
     item: PropertyItem;
     index: number;
+    actualEntityIndex: number;
     total: number;
     areaLayout: AreaLayout | null;
     status: PropertyStatus;
+    year: string | null;
     onEditText: (item: PropertyItem, entityIndex: number, field: PropertyItemEditableTextField) => void;
     onSelectArea: (item: PropertyItem, entityIndex: number, area: AreaLayoutArea | null) => void;
     draftLocationArea: {id: string; name: string} | null;
@@ -878,10 +1357,21 @@ function PropertyDetailBlock({
     completionFeedbackMessage: string | null;
     completionFeedbackKey: number;
     onRequestEditMode: () => void;
-    onAddPhoto: (item: PropertyItem, entityIndex: number) => void;
+    onAddPhoto: (item: PropertyItem, entityIndex: number, source: "camera" | "library") => void;
     onPreviewPhoto: (item: PropertyItem, entityIndex: number, photo: PropertyPhoto) => void;
     onPhotoOptions: (item: PropertyItem, entityIndex: number, photo: PropertyPhoto) => void;
     addingPhoto: boolean;
+    relationshipTargets: PropertyRelationshipTarget[];
+    relationshipDisabled: boolean;
+    onOpenParentPicker: () => void;
+    onOpenChildPicker: () => void;
+    onClearParent: () => void;
+    onRemoveChild: (childEntityKey: string) => void;
+    onOpenRelationshipTarget: (target: PropertyRelationshipTarget | null, fallbackKey?: string | null) => void;
+    summaryOnly?: boolean;
+    statusTitle?: string;
+    entityOptions?: DetailEntityMenuOption[];
+    onSelectEntity?: (index: number) => void;
 }) {
     const {width: windowWidth} = useWindowDimensions();
     const statusColors = PROPERTY_STATUS_COLORS[status];
@@ -903,10 +1393,13 @@ function PropertyDetailBlock({
             <View
                 style={[styles.summaryCard, {backgroundColor: statusColors.cardBg}]}
             >
-                {total > 1 && (
-                    <Text mb={8} textAlign="center" color={statusColors.nameColor} fontWeight="bold" fontSize="sm">
-                        實體 {index + 1} / {total}
-                    </Text>
+                {total > 1 && onSelectEntity && (
+                    <DetailEntityMenu
+                        index={index}
+                        total={total}
+                        options={entityOptions}
+                        onSelect={onSelectEntity}
+                    />
                 )}
                 <Text textAlign="center" color={statusColors.barcodeColor} fontWeight="bold" fontSize="2xl">{item.propertyName}</Text>
             </View>
@@ -916,7 +1409,9 @@ function PropertyDetailBlock({
                     <Text mt={4} textAlign="center" color={statusColors.barcodeColor} fontWeight="bold" fontSize="xl">{item.itemNumber}</Text>
                 </View>
                 <View style={[styles.summarySubCard, {backgroundColor: statusColors.cardBg}]}>
-                    <Text textAlign="center" color={statusColors.nameColor} fontWeight="bold" fontSize="md">目前狀態</Text>
+                    <Text textAlign="center" color={statusColors.nameColor} fontWeight="bold" fontSize="md" numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.78}>
+                        {statusTitle}
+                    </Text>
                     <Text mt={4} textAlign="center" color={statusColors.barcodeColor} fontWeight="bold" fontSize="xl">{PROPERTY_STATUS_LABELS[status]}</Text>
                 </View>
                 <View style={[styles.summarySubCard, {backgroundColor: statusColors.cardBg}]}>
@@ -926,6 +1421,7 @@ function PropertyDetailBlock({
                     </Text>
                 </View>
             </View>
+            {!summaryOnly && (
             <View style={styles.detailCard}>
                 <AreaLayoutInlinePreview
                     layout={areaLayout}
@@ -938,59 +1434,87 @@ function PropertyDetailBlock({
                     completionFeedbackMessage={completionFeedbackMessage}
                     completionFeedbackKey={completionFeedbackKey}
                     onRequestEditMode={onRequestEditMode}
-                    onSelectArea={(area) => onSelectArea(item, index, area)}
+                    onSelectArea={(area) => onSelectArea(item, actualEntityIndex, area)}
                 />
-                <EditableDetailRow label="詳細位置描述" value={item.location.description} onPress={() => onEditText(item, index, "locationDescription")} />
-                <EditableDetailRow label="其他備註" value={item.note} onPress={() => onEditText(item, index, "note")} />
-                <View style={styles.photoSectionHeader}>
-                    <Text fontSize="md" color="gray600" style={styles.detailLabel}>財產照片</Text>
-                    <Text fontSize="sm" color="gray500">{photoCount} / {MAX_PROPERTY_PHOTO_COUNT}</Text>
-                </View>
-                {photoCount > 0 && (
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.photoStrip}>
-                        {item.photos?.map((photo) => (
-                            <TouchableOpacity
-                                key={photo.id}
-                                activeOpacity={0.82}
-                                onPress={() => onPreviewPhoto(item, index, photo)}
-                                onLongPress={() => onPhotoOptions(item, index, photo)}
-                                style={[styles.photoThumbFrame, photoCount === 1 && singlePhotoThumbSize]}
-                            >
-                                <ExpoImage source={{uri: photo.uri}} style={styles.photoThumb} contentFit="cover" />
-                            </TouchableOpacity>
-                        ))}
-                        {photoCount < MAX_PROPERTY_PHOTO_COUNT && (
-                            <TouchableOpacity
-                                activeOpacity={0.78}
-                                disabled={addingPhoto}
-                                onPress={() => onAddPhoto(item, index)}
-                                style={[
-                                    styles.photoThumbFrame,
-                                    photoCount === 1 && singlePhotoThumbSize,
-                                    styles.addPhotoThumbButton,
-                                    addingPhoto && styles.addPhotoButtonDisabled,
-                                ]}
-                            >
-                                <Icon name="plus" fontFamily="Feather" color="#2563EB" fontSize="3xl" />
-                                <Text mt={4} color="#1D4ED8" fontSize="sm" fontWeight="bold">新增</Text>
-                            </TouchableOpacity>
-                        )}
-                    </ScrollView>
-                )}
-                {photoCount === 0 && (
-                    <TouchableOpacity
-                        activeOpacity={0.78}
-                        disabled={addingPhoto}
-                        onPress={() => onAddPhoto(item, index)}
-                        style={[styles.addPhotoButton, addingPhoto && styles.addPhotoButtonDisabled]}
-                    >
-                        <Icon name="library-add" fontFamily="MaterialIcons" color="#2563EB" fontSize="md" mr="sm" />
-                        <Text color="#1D4ED8" fontWeight="bold" fontSize="lg">
-                            {addingPhoto ? "處理照片中..." : "新增照片"}
+                <EditableDetailRow
+                    label="詳細位置描述"
+                    value={item.location.description}
+                    onPress={() => onEditText(item, actualEntityIndex, "locationDescription")}
+                />
+                <EditableDetailRow
+                    label="其他備註"
+                    value={item.note}
+                    onPress={() => onEditText(item, actualEntityIndex, "note")}
+                />
+                <View style={styles.photoSection}>
+                    <View style={styles.photoSectionHeader}>
+                        <Text fontSize="md" color="gray600" style={[styles.detailLabel, styles.photoSectionTitle]} numberOfLines={1}>財產照片</Text>
+                        <Text
+                            fontSize="sm"
+                            color="gray500"
+                            style={styles.photoSectionCount}
+                            numberOfLines={1}
+                            adjustsFontSizeToFit
+                            minimumFontScale={0.82}
+                        >
+                            {photoCount} / {MAX_PROPERTY_PHOTO_COUNT}
                         </Text>
-                    </TouchableOpacity>
-                )}
+                    </View>
+                    {photoCount > 0 && (
+                        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.photoStrip}>
+                            {item.photos?.map((photo) => (
+                                <TouchableOpacity
+                                    key={photo.id}
+                                    activeOpacity={0.82}
+                                    onPress={() => onPreviewPhoto(item, actualEntityIndex, photo)}
+                                    onLongPress={() => onPhotoOptions(item, actualEntityIndex, photo)}
+                                    style={[styles.photoThumbFrame, photoCount === 1 && singlePhotoThumbSize]}
+                                >
+                                    <ExpoImage source={{uri: photo.uri}} style={styles.photoThumb} contentFit="cover" />
+                                </TouchableOpacity>
+                            ))}
+                            {photoCount < MAX_PROPERTY_PHOTO_COUNT && (
+                                <PhotoSourceMenu addingPhoto={addingPhoto} onSelect={(source) => onAddPhoto(item, actualEntityIndex, source)}>
+                                    <View
+                                        style={[
+                                            styles.photoThumbFrame,
+                                            photoCount === 1 && singlePhotoThumbSize,
+                                            styles.addPhotoThumbButton,
+                                            addingPhoto && styles.addPhotoButtonDisabled,
+                                        ]}
+                                    >
+                                        <Icon name="plus" fontFamily="Feather" color="#2563EB" fontSize="3xl" />
+                                        <Text mt={4} color="#1D4ED8" fontSize="sm" fontWeight="bold">新增</Text>
+                                    </View>
+                                </PhotoSourceMenu>
+                            )}
+                        </ScrollView>
+                    )}
+                    {photoCount === 0 && (
+                        <PhotoSourceMenu addingPhoto={addingPhoto} onSelect={(source) => onAddPhoto(item, actualEntityIndex, source)}>
+                            <View style={[styles.addPhotoButton, addingPhoto && styles.addPhotoButtonDisabled]}>
+                                <Icon name="library-add" fontFamily="MaterialIcons" color="#2563EB" fontSize="sm" mr="sm" />
+                                <Text color="#1D4ED8" fontWeight="bold" fontSize="md">
+                                    {addingPhoto ? "處理照片中..." : "新增照片"}
+                                </Text>
+                            </View>
+                        </PhotoSourceMenu>
+                    )}
+                </View>
+                <PropertyRelationshipSection
+                    item={item}
+                    entityIndex={actualEntityIndex}
+                    targets={relationshipTargets}
+                    year={year}
+                    disabled={relationshipDisabled}
+                    onOpenParentPicker={onOpenParentPicker}
+                    onOpenChildPicker={onOpenChildPicker}
+                    onClearParent={onClearParent}
+                    onRemoveChild={onRemoveChild}
+                    onOpenTarget={onOpenRelationshipTarget}
+                />
             </View>
+            )}
         </Div>
     );
 }
@@ -1046,14 +1570,19 @@ function EntitySelectionStep({
 export default function Details() {
     const insets = useSafeAreaInsets();
     const {showActionSheetWithOptions} = useSafeAreaActionSheet();
+    const {selectedYear: activeInspectionYear} = usePropertyYear();
     const params = useLocalSearchParams<{barcode?: string; serial?: string; entityIndex?: string; status?: string; year?: string}>();
     const barcode = useMemo(() => getParamValue(params.barcode) ?? getParamValue(params.serial), [params.barcode, params.serial]);
     const requestedEntityIndex = useMemo(() => parseEntityIndexParam(getParamValue(params.entityIndex)), [params.entityIndex]);
     const requestedYear = useMemo(() => getParamValue(params.year), [params.year]);
     const [items, setItems] = useState<PropertyItem[]>([]);
     const [areaLayout, setAreaLayout] = useState<AreaLayout | null>(null);
+    const [relationshipItemsByBarcode, setRelationshipItemsByBarcode] = useState<PropertyItemsByBarcode>({});
+    const [relationshipTargets, setRelationshipTargets] = useState<PropertyRelationshipTarget[]>([]);
+    const [relationshipPicker, setRelationshipPicker] = useState<RelationshipPickerState | null>(null);
     const [propertyStatus, setPropertyStatus] = useState<PropertyStatus>("unknown");
     const [entityStatuses, setEntityStatuses] = useState<PropertyStatus[]>([]);
+    const [viewingYear, setViewingYear] = useState<string | null>(null);
     const [selectedEntityIndex, setSelectedEntityIndex] = useState<number | null>(null);
     const [editingLockedFields, setEditingLockedFields] = useState(false);
     const [draftLocationArea, setDraftLocationArea] = useState<{id: string; name: string} | null>(null);
@@ -1065,6 +1594,7 @@ export default function Details() {
     const [savingEditableText, setSavingEditableText] = useState(false);
     const [updatingStatus, setUpdatingStatus] = useState(false);
     const [updatingLocationArea, setUpdatingLocationArea] = useState(false);
+    const [updatingRelationships, setUpdatingRelationships] = useState(false);
     const [updatingPropertyLabelQueue, setUpdatingPropertyLabelQueue] = useState(false);
     const [addingPhoto, setAddingPhoto] = useState(false);
     const [savingPhotoToLibrary, setSavingPhotoToLibrary] = useState(false);
@@ -1078,19 +1608,79 @@ export default function Details() {
         entityIndex: number;
         photo: PropertyPhoto;
     } | null>(null);
-    const [photoSourceTarget, setPhotoSourceTarget] = useState<{
-        item: PropertyItem;
-        entityIndex: number;
-    } | null>(null);
-    const [photoSourceLaunchKey, setPhotoSourceLaunchKey] = useState(0);
     const locationCompletionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const pendingPhotoSourceRequestRef = useRef<{
-        source: "camera" | "library";
-        item: PropertyItem;
-        entityIndex: number;
-    } | null>(null);
-    const selectedItem = selectedEntityIndex !== null ? items[selectedEntityIndex] ?? null : null;
     const statusLookupKey = items.map((item) => item.sourceYears.join(",")).join("|");
+    const itemYears = useMemo(() => (
+        [...new Set(items.flatMap((item) => item.sourceYears))]
+            .filter(Boolean)
+            .sort(comparePropertyYearsDescending)
+    ), [statusLookupKey, items]);
+    const selectedRawItem = selectedEntityIndex !== null ? items[selectedEntityIndex] ?? null : null;
+    const selectedRawItemYearsKey = selectedRawItem?.sourceYears.join(",") ?? "";
+    const detailYearOptions = useMemo(() => (
+        selectedRawItem
+            ? [...new Set(selectedRawItem.sourceYears)].filter(Boolean).sort(comparePropertyYearsDescending)
+            : itemYears
+    ), [itemYears, selectedRawItem, selectedRawItemYearsKey]);
+    const visibleEntityIndexes = useMemo(() => (
+        items.flatMap((item, entityIndex) => (
+            viewingYear && !itemExistsInPropertyYear(item.sourceYears, viewingYear) ? [] : [entityIndex]
+        ))
+    ), [items, viewingYear]);
+    const visibleItems = useMemo(() => (
+        visibleEntityIndexes.map((entityIndex) => ({
+            ...items[entityIndex],
+            itemNumber: getPropertyItemNumberForYear(items[entityIndex], viewingYear),
+        }))
+    ), [items, viewingYear, visibleEntityIndexes]);
+    const entityMenuOptions = useMemo<DetailEntityMenuOption[]>(() => (
+        visibleItems.map((item, entityIndex) => ({
+            id: String(entityIndex),
+            title: `實體 ${entityIndex + 1}｜${item.propertyName}`,
+        }))
+    ), [visibleItems]);
+    const visibleEntityStatuses = useMemo(() => (
+        visibleEntityIndexes.map((entityIndex) => entityStatuses[entityIndex] ?? "unknown")
+    ), [entityStatuses, visibleEntityIndexes]);
+    const selectedItem = selectedEntityIndex !== null && visibleEntityIndexes.includes(selectedEntityIndex)
+        ? items[selectedEntityIndex] ?? null
+        : null;
+    const selectedVisibleEntityIndex = selectedEntityIndex !== null
+        ? visibleEntityIndexes.indexOf(selectedEntityIndex)
+        : -1;
+    const displayedSelectedItem = selectedItem
+        ? {
+            ...selectedItem,
+            itemNumber: getPropertyItemNumberForYear(selectedItem, viewingYear),
+        }
+        : null;
+    const isQuickStatusView = !!viewingYear
+        && !!activeInspectionYear
+        && !isSamePropertyYear(viewingYear, activeInspectionYear);
+    const viewingWesternYear = propertyYearToWesternNumber(viewingYear);
+    const activeInspectionWesternYear = propertyYearToWesternNumber(activeInspectionYear);
+    const selectedEntityExistsInActiveInspectionYear = !!selectedRawItem
+        && itemExistsInPropertyYear(selectedRawItem.sourceYears, activeInspectionYear);
+    const isPossiblyRetiredQuickStatusView = isQuickStatusView
+        && viewingWesternYear !== null
+        && activeInspectionWesternYear !== null
+        && viewingWesternYear < activeInspectionWesternYear
+        && !selectedEntityExistsInActiveInspectionYear;
+    const isPossiblyNewQuickStatusView = isQuickStatusView
+        && viewingWesternYear !== null
+        && activeInspectionWesternYear !== null
+        && viewingWesternYear > activeInspectionWesternYear
+        && !selectedEntityExistsInActiveInspectionYear;
+    const isSummaryOnlyQuickStatusView = isQuickStatusView && !isPossiblyRetiredQuickStatusView;
+    const activeInspectionYearLabel = activeInspectionYear ?? "未選擇";
+    const activeInspectionEntityIndexes = useMemo(() => (
+        activeInspectionYear
+            ? items.flatMap((item, entityIndex) => (
+                itemExistsInPropertyYear(item.sourceYears, activeInspectionYear) ? [entityIndex] : []
+            ))
+            : []
+    ), [activeInspectionYear, items]);
+    const canReturnToActiveInspectionYear = activeInspectionEntityIndexes.length > 0;
     const currentLocationArea = selectedItem?.location.areaId && selectedItem.location.areaName
         ? {id: selectedItem.location.areaId, name: selectedItem.location.areaName}
         : null;
@@ -1098,10 +1688,14 @@ export default function Details() {
     const statusLocked = propertyStatus !== "unknown";
     const locationEditMode = editingLockedFields;
     const fieldsEditable = !statusLocked || locationEditMode;
-    const pageLoading = loading || statusLoading;
-    const actionDisabled = pageLoading || !selectedItem || updatingStatus || updatingLocationArea;
+    const pageLoading = loading;
+    const actionDisabled = pageLoading || statusLoading || !selectedItem || updatingStatus || updatingLocationArea || updatingRelationships;
+    const relationshipDisabled = pageLoading || !selectedItem || updatingRelationships || isSummaryOnlyQuickStatusView;
     const showFixedActions = !pageLoading && !!selectedItem;
-    const contentBottomPadding = showFixedActions ? Math.max(insets.bottom, 12) + 156 : Math.max(insets.bottom, 12) + 24;
+    const contentBottomPadding = showFixedActions
+        ? Math.max(insets.bottom, 12) + (isQuickStatusView ? 178 : 156)
+        : Math.max(insets.bottom, 12) + 24;
+    const requireDraftLocationBeforeSave = statusLocked && !draftLocationArea && !isPossiblyRetiredQuickStatusView;
 
     const showLocationCompletion = (message = "已更新位置") => {
         if (locationCompletionTimerRef.current) {
@@ -1135,8 +1729,15 @@ export default function Details() {
             }
 
             try {
-                const result = await getPropertyItemsByBarcode(barcode);
-                if (mounted) setItems(result);
+                const [result, targets] = await Promise.all([
+                    getPropertyItemsByBarcode(barcode),
+                    getStoredRelationshipItemsByBarcode(),
+                ]);
+                if (mounted) {
+                    setItems(result);
+                    setRelationshipItemsByBarcode(targets);
+                    setRelationshipTargets(getRelationshipTargets(targets));
+                }
             } finally {
                 if (mounted) setLoading(false);
             }
@@ -1147,24 +1748,67 @@ export default function Details() {
         };
     }, [barcode]);
 
+    useFocusEffect(
+        useCallback(() => {
+            let active = true;
+
+            void (async () => {
+                if (!barcode) return;
+
+                try {
+                    const nextItemsByBarcode = await getStoredRelationshipItemsByBarcode();
+                    if (!active) return;
+
+                    setItems(nextItemsByBarcode[barcode] ?? []);
+                    setRelationshipItemsByBarcode(nextItemsByBarcode);
+                    setRelationshipTargets(getRelationshipTargets(nextItemsByBarcode));
+                } catch (error) {
+                    console.error("重新讀取附屬關係資料失敗:", error);
+                }
+            })();
+
+            return () => {
+                active = false;
+            };
+        }, [barcode]),
+    );
+
     useEffect(() => {
-        if (items.length === 0) {
+        if (visibleEntityIndexes.length === 0) {
             setSelectedEntityIndex(null);
             return;
         }
 
-        if (items.length === 1) {
-            setSelectedEntityIndex(0);
+        if (visibleEntityIndexes.length === 1) {
+            setSelectedEntityIndex(visibleEntityIndexes[0]);
             return;
         }
 
-        if (requestedEntityIndex !== null && requestedEntityIndex < items.length) {
+        if (requestedEntityIndex !== null && visibleEntityIndexes.includes(requestedEntityIndex)) {
             setSelectedEntityIndex(requestedEntityIndex);
             return;
         }
 
         setSelectedEntityIndex(null);
-    }, [items.length, requestedEntityIndex]);
+    }, [requestedEntityIndex, visibleEntityIndexes]);
+
+    useEffect(() => {
+        const routeYear = requestedYear && detailYearOptions.some((year) => isSamePropertyYear(year, requestedYear))
+            ? detailYearOptions.find((year) => isSamePropertyYear(year, requestedYear)) ?? requestedYear
+            : null;
+        const inspectionYear = activeInspectionYear && detailYearOptions.some((year) => isSamePropertyYear(year, activeInspectionYear))
+            ? detailYearOptions.find((year) => isSamePropertyYear(year, activeInspectionYear)) ?? activeInspectionYear
+            : null;
+        const fallbackYear = detailYearOptions[0] ?? null;
+
+        setViewingYear((currentYear) => {
+            if (currentYear && detailYearOptions.some((year) => isSamePropertyYear(year, currentYear))) {
+                return currentYear;
+            }
+
+            return routeYear ?? inspectionYear ?? fallbackYear;
+        });
+    }, [activeInspectionYear, detailYearOptions, requestedYear]);
 
     useFocusEffect(
         useCallback(() => {
@@ -1182,8 +1826,7 @@ export default function Details() {
                         return;
                     }
 
-                    const itemYears = [...new Set(statusLookupKey.split("|").flatMap((sourceYears) => sourceYears.split(",")).filter(Boolean))];
-                    const years = requestedYear && itemYears.includes(requestedYear) ? [requestedYear] : itemYears;
+                    const years = viewingYear ? [viewingYear] : itemYears;
                     const nextEntityStatuses = Array<PropertyStatus>(items.length).fill("unknown");
                     const statusPrecedence: PropertyStatus[] = ["unknown", "pending", "checked"];
 
@@ -1198,6 +1841,8 @@ export default function Details() {
                             for (const entry of statusEntries) {
                                 const parsedEntry = parsePropertyStatusEntryKey(entry);
                                 if (!parsedEntry || parsedEntry.barcode !== barcode || parsedEntry.entityIndex >= items.length) continue;
+                                const item = items[parsedEntry.entityIndex];
+                                if (!item || !itemExistsInPropertyYear(item.sourceYears, year)) continue;
 
                                 nextEntityStatuses[parsedEntry.entityIndex] = status;
                             }
@@ -1208,7 +1853,7 @@ export default function Details() {
                         setEntityStatuses(nextEntityStatuses);
                         setPropertyStatus(selectedEntityIndex !== null
                             ? nextEntityStatuses[selectedEntityIndex] ?? "unknown"
-                            : nextEntityStatuses[0] ?? "unknown");
+                            : nextEntityStatuses[visibleEntityIndexes[0] ?? 0] ?? "unknown");
                     }
                 } finally {
                     if (active) setStatusLoading(false);
@@ -1218,7 +1863,7 @@ export default function Details() {
             return () => {
                 active = false;
             };
-        }, [barcode, items.length, requestedYear, selectedEntityIndex, statusLookupKey]),
+        }, [barcode, itemYears, items, selectedEntityIndex, viewingYear, visibleEntityIndexes]),
     );
 
     useEffect(() => {
@@ -1231,6 +1876,15 @@ export default function Details() {
         setEditingLockedFields(false);
         setDraftLocationArea(null);
     }, [propertyStatus, selectedEntityIndex]);
+
+    useEffect(() => {
+        if (!isSummaryOnlyQuickStatusView) return;
+
+        setEditingLockedFields(false);
+        setDraftLocationArea(null);
+        setEditingTarget(null);
+        setPreviewingPhoto(null);
+    }, [isSummaryOnlyQuickStatusView]);
 
     useEffect(() => {
         let mounted = true;
@@ -1296,17 +1950,11 @@ export default function Details() {
     };
 
     const selectEntity = (entityIndex: number) => {
-        if (!barcode) return;
-
-        router.push({
-            pathname: "/stacks/details",
-            params: {
-                barcode,
-                entityIndex: String(entityIndex),
-                status: entityStatuses[entityIndex] ?? propertyStatus,
-                ...(requestedYear ? {year: requestedYear} : {}),
-            },
-        });
+        setSelectedEntityIndex(entityIndex);
+        setEditingLockedFields(false);
+        setDraftLocationArea(null);
+        setEditingTarget(null);
+        setPreviewingPhoto(null);
     };
 
     const requestEditMode = (afterConfirmed?: () => void) => {
@@ -1405,7 +2053,7 @@ export default function Details() {
     const saveDraftLocationEdit = async () => {
         if (!selectedItem || selectedEntityIndex === null) return;
 
-        if (statusLocked && !draftLocationArea) {
+        if (requireDraftLocationBeforeSave) {
             Alert.alert("尚未選取位置", "請先在位置圖上選取一個區域後再儲存。");
             return;
         }
@@ -1435,14 +2083,18 @@ export default function Details() {
 
     const updateSelectedPropertyStatus = async (nextStatus: PropertyStatus) => {
         if (!selectedItem || selectedEntityIndex === null) return;
+        if (isQuickStatusView) {
+            Alert.alert("無法更新盤點狀態", "正在快速查看非目前盤點年度的盤點狀態。請回到目前盤點年份後再操作。");
+            return;
+        }
 
         if (nextStatus === "checked" && !hasSelectedLocationArea) {
             Alert.alert("尚未選取位置", "確認盤點前，請先在位置圖上點選此財產所在區域。");
             return;
         }
 
-        const year = requestedYear && selectedItem.sourceYears.includes(requestedYear)
-            ? requestedYear
+        const year = viewingYear && itemExistsInPropertyYear(selectedItem.sourceYears, viewingYear)
+            ? viewingYear
             : getPrimarySourceYear(selectedItem);
         if (!year) {
             Alert.alert("無法更新狀態", "此財產沒有可用的匯入年度資料。");
@@ -1557,14 +2209,23 @@ export default function Details() {
         await importPropertyPhotoAsset(item, entityIndex, result.assets[0]);
     };
 
-    const openAddPhotoMenu = (item: PropertyItem, entityIndex: number) => {
+    const openAddPhotoMenu = (item: PropertyItem, entityIndex: number, source: "camera" | "library") => {
         if (addingPhoto) return;
+
         if ((item.photos?.length ?? 0) >= MAX_PROPERTY_PHOTO_COUNT) {
             Alert.alert("照片已達上限", `每個財產實體最多只能保存 ${MAX_PROPERTY_PHOTO_COUNT} 張照片。`);
             return;
         }
 
-        setPhotoSourceTarget({item, entityIndex});
+        const launchDelay = Platform.OS === "ios" ? 160 : 40;
+        setTimeout(() => {
+            if (source === "camera") {
+                void pickPhotoFromCamera(item, entityIndex);
+                return;
+            }
+
+            void pickPhotoFromLibrary(item, entityIndex);
+        }, launchDelay);
     };
 
     const openPhotoPreview = (item: PropertyItem, entityIndex: number, photo: PropertyPhoto) => {
@@ -1649,37 +2310,6 @@ export default function Details() {
         );
     };
 
-    const queuePhotoSourceLaunch = (source: "camera" | "library") => {
-        if (!photoSourceTarget || addingPhoto) return;
-
-        pendingPhotoSourceRequestRef.current = {
-            source,
-            item: photoSourceTarget.item,
-            entityIndex: photoSourceTarget.entityIndex,
-        };
-        setPhotoSourceTarget(null);
-        setPhotoSourceLaunchKey((key) => key + 1);
-    };
-
-    useEffect(() => {
-        if (photoSourceTarget !== null) return;
-
-        const request = pendingPhotoSourceRequestRef.current;
-        if (!request) return;
-
-        pendingPhotoSourceRequestRef.current = null;
-        const launchTimer = setTimeout(() => {
-            if (request.source === "camera") {
-                void pickPhotoFromCamera(request.item, request.entityIndex);
-                return;
-            }
-
-            void pickPhotoFromLibrary(request.item, request.entityIndex);
-        }, Platform.OS === "ios" ? 520 : 280);
-
-        return () => clearTimeout(launchTimer);
-    }, [photoSourceLaunchKey, photoSourceTarget]);
-
     const addSelectedItemToPropertyLabelQueue = async () => {
         if (!selectedItem) return;
 
@@ -1739,6 +2369,210 @@ export default function Details() {
         void addSelectedItemToPropertyLabelQueue();
     };
 
+    const applyRelationshipItems = (nextItemsByBarcode: PropertyItemsByBarcode) => {
+        if (barcode) setItems(nextItemsByBarcode[barcode] ?? []);
+        setRelationshipItemsByBarcode(nextItemsByBarcode);
+        setRelationshipTargets(getRelationshipTargets(nextItemsByBarcode));
+    };
+
+    const targetCanBeSelectedInViewingYear = (target: PropertyRelationshipTarget) => (
+        !viewingYear || itemExistsInPropertyYear(target.item.sourceYears, viewingYear)
+    );
+
+    const runRelationshipUpdate = async (
+        updater: () => Promise<PropertyItemsByBarcode>,
+        successMessage: string,
+    ) => {
+        if (updatingRelationships) return;
+
+        setUpdatingRelationships(true);
+        try {
+            const nextItemsByBarcode = await updater();
+            applyRelationshipItems(nextItemsByBarcode);
+            setRelationshipPicker(null);
+            Alert.alert("附屬關係已更新", successMessage);
+        } catch (error) {
+            console.error("更新附屬關係失敗:", error);
+            Alert.alert("更新失敗", error instanceof Error ? error.message : "無法更新附屬關係，請稍後再試。");
+        } finally {
+            setUpdatingRelationships(false);
+        }
+    };
+
+    const getSelectedEntityKey = () => {
+        if (!selectedItem || selectedEntityIndex === null) return null;
+
+        return getPropertyEntityKey(selectedItem.barcode, selectedEntityIndex);
+    };
+
+    const openParentPicker = () => {
+        const currentEntityKey = getSelectedEntityKey();
+        if (!currentEntityKey) return;
+
+        const targets = relationshipTargets.filter((target) => (
+            target.entityKey !== currentEntityKey
+            && target.entityKey !== selectedItem?.parentEntityKey
+            && targetCanBeSelectedInViewingYear(target)
+            && !isPropertyRelationshipDescendant(relationshipItemsByBarcode, currentEntityKey, target.entityKey)
+        ));
+        if (targets.length === 0) {
+            Alert.alert("沒有可選上層財產", "目前沒有其他財產可設定為上層財產。");
+            return;
+        }
+
+        setRelationshipPicker({
+            mode: "parent",
+            title: "設定上層財產",
+            targets,
+        });
+    };
+
+    const openChildPicker = () => {
+        const currentEntityKey = getSelectedEntityKey();
+        if (!selectedItem || !currentEntityKey) return;
+
+        const currentChildKeys = new Set(selectedItem.childEntityKeys ?? []);
+        const targets = relationshipTargets.filter((target) => (
+            target.entityKey !== currentEntityKey
+            && !currentChildKeys.has(target.entityKey)
+            && targetCanBeSelectedInViewingYear(target)
+            && !isPropertyRelationshipDescendant(relationshipItemsByBarcode, target.entityKey, currentEntityKey)
+        ));
+        if (targets.length === 0) {
+            Alert.alert("沒有可新增附屬財產", "目前沒有其他可新增的附屬財產。");
+            return;
+        }
+
+        setRelationshipPicker({
+            mode: "child",
+            title: "新增附屬財產",
+            targets,
+        });
+    };
+
+    const updateParent = (parentEntityKey: string | null) => {
+        if (!selectedItem || selectedEntityIndex === null) return;
+
+        void runRelationshipUpdate(
+            () => setPropertyItemParent(selectedItem.barcode, selectedEntityIndex, parentEntityKey),
+            parentEntityKey ? "已設定上層財產。" : "已清除上層財產。",
+        );
+    };
+
+    const addChild = (childEntityKey: string) => {
+        if (!selectedItem || selectedEntityIndex === null) return;
+
+        void runRelationshipUpdate(
+            () => addPropertyItemChild(selectedItem.barcode, selectedEntityIndex, childEntityKey),
+            "已新增附屬財產。",
+        );
+    };
+
+    const handleRelationshipTargetSelect = (target: PropertyRelationshipTarget) => {
+        const currentEntityKey = getSelectedEntityKey();
+        if (!currentEntityKey || !relationshipPicker) return;
+
+        if (relationshipPicker.mode === "parent") {
+            updateParent(target.entityKey);
+            return;
+        }
+
+        const currentParentKey = target.item.parentEntityKey ?? null;
+        if (currentParentKey && currentParentKey !== currentEntityKey) {
+            const previousParentTarget = relationshipTargets.find((candidate) => candidate.entityKey === currentParentKey) ?? null;
+            Alert.alert(
+                "更改附屬財產的上層？",
+                `此財產目前已附屬於其他財產：\n\n${getPropertyRelationshipShortLabel(previousParentTarget, currentParentKey)}\n\n是否覆蓋並更改為目前項目？`,
+                [
+                    {text: "取消", style: "cancel"},
+                    {
+                        text: "確認更改",
+                        style: "destructive",
+                        onPress: () => addChild(target.entityKey),
+                    },
+                ],
+            );
+            return;
+        }
+
+        addChild(target.entityKey);
+    };
+
+    const confirmClearParent = () => {
+        if (!selectedItem?.parentEntityKey) return;
+
+        Alert.alert("清除上層財產", "確定要清除此財產的上層財產？", [
+            {text: "取消", style: "cancel"},
+            {
+                text: "清除",
+                style: "destructive",
+                onPress: () => updateParent(null),
+            },
+        ]);
+    };
+
+    const confirmRemoveChild = (childEntityKey: string) => {
+        if (!selectedItem || selectedEntityIndex === null) return;
+
+        const childTarget = relationshipTargets.find((target) => target.entityKey === childEntityKey) ?? null;
+        Alert.alert(
+            "移除附屬財產",
+            `確定要移除此附屬財產？\n${getPropertyRelationshipShortLabel(childTarget, childEntityKey)}`,
+            [
+                {text: "取消", style: "cancel"},
+                {
+                    text: "移除",
+                    style: "destructive",
+                    onPress: () => {
+                        void runRelationshipUpdate(
+                            () => removePropertyItemChild(selectedItem.barcode, selectedEntityIndex, childEntityKey),
+                            "已移除附屬財產。",
+                        );
+                    },
+                },
+            ],
+        );
+    };
+
+    const openRelationshipTarget = (target: PropertyRelationshipTarget | null, fallbackKey?: string | null) => {
+        if (!target) {
+            Alert.alert("找不到財產資料", fallbackKey ? `此關係指向的財產資料不存在：\n${fallbackKey}` : "此關係指向的財產資料不存在。");
+            return;
+        }
+
+        const navigateToTarget = () => {
+            router.push({
+                pathname: "/stacks/details",
+                params: {
+                    barcode: target.barcode,
+                    entityIndex: String(target.entityIndex),
+                    ...(viewingYear ? {year: viewingYear} : {}),
+                },
+            });
+        };
+
+        if (!propertyRelationshipExistsInYear(target, viewingYear)) {
+            navigateToTarget()
+            const viewingWesternYear = propertyYearToWesternNumber(viewingYear);
+            const sourceWesternYears = target.item.sourceYears
+                .map(propertyYearToWesternNumber)
+                .filter((year): year is number => year !== null);
+            const sourceYearText = target.item.sourceYears.length > 0 ? target.item.sourceYears.join("、") : "其他";
+            const lifecycleText = viewingWesternYear !== null && sourceWesternYears.some((year) => year > viewingWesternYear)
+                ? `此財產可能於 ${sourceYearText} 年新增`
+                : `此財產可能已於 ${sourceYearText} 年報廢`;
+
+            Alert.alert(
+                "財產不屬於目前盤點年度",
+                `${viewingYear ? `目前正在盤點 ${viewingYear} 年度\n` : ""}${lifecycleText}\n\n僅顯示該年度的盤點狀態。`,
+                [{text: "知道了"}],
+            );
+            return;
+        }
+
+        navigateToTarget();
+    };
+
     return (
         <View style={[styles.container, {paddingTop: Platform.OS === "ios" ? insets.top + 14 : insets.top + 18}]}>
             <View style={styles.headerRow}>
@@ -1762,6 +2596,9 @@ export default function Details() {
                     <Text fontSize={22} fontWeight="bold" color="gray900">財產詳細資訊</Text>
                     <Text mt={2} fontSize={14} color="gray600">{barcode? "編號："+barcode : "編號不明"}</Text>
                 </View>
+                <View style={styles.headerYearSlot}>
+                    <DetailYearMenu years={detailYearOptions} selectedYear={viewingYear} onSelect={setViewingYear} />
+                </View>
             </View>
 
             <ScrollView
@@ -1779,22 +2616,27 @@ export default function Details() {
                         <Text textAlign="center" fontSize="xl" color="gray600">⚠️ 查無此條碼的財產資料</Text>
                     </View>
                 )}
-                {!pageLoading && items.length > 1 && selectedEntityIndex === null && (
+                {!pageLoading && visibleItems.length > 1 && selectedEntityIndex === null && (
                     <EntitySelectionStep
-                        items={items}
-                        statuses={entityStatuses}
+                        items={visibleItems}
+                        statuses={visibleEntityStatuses}
                         fallbackStatus={propertyStatus}
-                        onSelect={selectEntity}
+                        onSelect={(visibleEntityIndex) => {
+                            const entityIndex = visibleEntityIndexes[visibleEntityIndex];
+                            if (entityIndex !== undefined) selectEntity(entityIndex);
+                        }}
                     />
                 )}
-                {!pageLoading && selectedItem && (
+                {!pageLoading && selectedEntityIndex !== null && selectedItem && displayedSelectedItem && (
                     <PropertyDetailBlock
                         key={`${selectedItem.barcode}:${selectedEntityIndex}`}
-                        item={selectedItem}
-                        index={selectedEntityIndex ?? 0}
-                        total={items.length}
+                        item={displayedSelectedItem}
+                        index={selectedVisibleEntityIndex >= 0 ? selectedVisibleEntityIndex : 0}
+                        actualEntityIndex={selectedEntityIndex}
+                        total={visibleItems.length}
                         areaLayout={areaLayout}
                         status={propertyStatus}
+                        year={viewingYear}
                         onEditText={openTextEditor}
                         onSelectArea={selectLocationArea}
                         draftLocationArea={draftLocationArea}
@@ -1808,6 +2650,20 @@ export default function Details() {
                         onPreviewPhoto={openPhotoPreview}
                         onPhotoOptions={openPhotoOptions}
                         addingPhoto={addingPhoto}
+                        relationshipTargets={relationshipTargets}
+                        relationshipDisabled={relationshipDisabled}
+                        onOpenParentPicker={openParentPicker}
+                        onOpenChildPicker={openChildPicker}
+                        onClearParent={confirmClearParent}
+                        onRemoveChild={confirmRemoveChild}
+                        onOpenRelationshipTarget={openRelationshipTarget}
+                        summaryOnly={isSummaryOnlyQuickStatusView}
+                        statusTitle={viewingYear ? `${viewingYear} 年狀態` : "目前狀態"}
+                        entityOptions={entityMenuOptions}
+                        onSelectEntity={(visibleEntityIndex) => {
+                            const entityIndex = visibleEntityIndexes[visibleEntityIndex];
+                            if (entityIndex !== undefined) selectEntity(entityIndex);
+                        }}
                     />
                 )}
             </ScrollView>
@@ -1820,6 +2676,12 @@ export default function Details() {
                 onClose={() => setEditingTarget(null)}
                 onRequestEdit={requestTextEdit}
                 onSave={saveEditableText}
+            />
+            <RelationshipPickerModal
+                state={relationshipPicker}
+                year={viewingYear}
+                onClose={() => setRelationshipPicker(null)}
+                onSelect={handleRelationshipTargetSelect}
             />
             <PropertyPhotoPreviewModal
                 photo={previewingPhoto?.photo ?? null}
@@ -1834,17 +2696,9 @@ export default function Details() {
                 }}
                 savingToLibrary={savingPhotoToLibrary}
             />
-            <PhotoSourceModal
-                visible={photoSourceTarget !== null}
-                addingPhoto={addingPhoto}
-                onClose={() => setPhotoSourceTarget(null)}
-                onCamera={() => queuePhotoSourceLaunch("camera")}
-                onLibrary={() => queuePhotoSourceLaunch("library")}
-            />
-
             {showFixedActions && (
             <View style={[styles.fixedActions, {paddingBottom: Math.max(insets.bottom, 12)}]}>
-                {locationEditMode ? (
+                {locationEditMode && !isSummaryOnlyQuickStatusView ? (
                     <Div row mt="sm">
                         <Button
                             flex={1}
@@ -1868,13 +2722,78 @@ export default function Details() {
                             rounded={12}
                             py="lg"
                             fontWeight="bold"
-                            disabled={updatingLocationArea || (statusLocked && !draftLocationArea)}
+                            disabled={updatingLocationArea || requireDraftLocationBeforeSave}
                             onPress={() => { void saveDraftLocationEdit(); }}
                             suffix={<Icon name="save" fontFamily="Feather" fontSize="lg" ml="sm" color="#FFFFFF" />}
                         >
                             儲存位置
                         </Button>
                     </Div>
+                ) : isQuickStatusView ? (
+                    <>
+                        <View style={styles.quickStatusNotice}>
+                            <Text color="gray700" fontSize="sm" fontWeight="bold" textAlign="center">
+                                目前盤點設定：{activeInspectionYearLabel} 年度
+                            </Text>
+                            <Text mt={4} color="gray600" fontSize="sm" textAlign="center">
+                                正在查看 {viewingYear} 年度盤點狀態{isSummaryOnlyQuickStatusView ? "（僅摘要）" : ""}
+                            </Text>
+                            {isPossiblyRetiredQuickStatusView ? (
+                                <Text mt={4} color="gray600" fontSize="sm" textAlign="center">
+                                    此財產可能已報廢，可更新現場資料
+                                </Text>
+                            ) : isPossiblyNewQuickStatusView ? (
+                                <Text mt={4} color="gray600" fontSize="sm" textAlign="center">
+                                    此財產實體可能於 {viewingYear} 年新增
+                                </Text>
+                            ) : !canReturnToActiveInspectionYear && (
+                                <Text mt={4} color="gray600" fontSize="sm" textAlign="center">
+                                    此財產不在目前盤點年度資料中
+                                </Text>
+                            )}
+                        </View>
+                        {canReturnToActiveInspectionYear ? (
+                            <Button
+                                block
+                                mt="sm"
+                                bg="#2563EB"
+                                color="#FFFFFF"
+                                rounded={12}
+                                py="lg"
+                                fontSize="sm"
+                                fontWeight="bold"
+                                onPress={() => {
+                                    if (!activeInspectionYear) return;
+                                    const preferredEntityIndex = selectedEntityIndex !== null
+                                        && activeInspectionEntityIndexes.includes(selectedEntityIndex)
+                                        ? selectedEntityIndex
+                                        : activeInspectionEntityIndexes[0];
+                                    if (preferredEntityIndex !== undefined) {
+                                        setSelectedEntityIndex(preferredEntityIndex);
+                                    }
+                                    setViewingYear(activeInspectionYear);
+                                }}
+                                prefix={<Icon name="rotate-ccw" fontFamily="Feather" fontSize="lg" mr="sm" color="#FFFFFF" />}
+                            >
+                                返回目前盤點年度
+                            </Button>
+                        ) : (
+                            <Button
+                                block
+                                mt="sm"
+                                bg="gray600"
+                                color="#FFFFFF"
+                                rounded={12}
+                                py="lg"
+                                fontSize="sm"
+                                fontWeight="bold"
+                                onPress={() => {if(router.canGoBack()) router.back()}}
+                                prefix={<Icon name="arrow-back" fontFamily="Ionicons" fontSize="lg" mr="sm" color="#FFFFFF" />}
+                            >
+                                返回上頁
+                            </Button>
+                        )}
+                    </>
                 ) : (
                     <>
                         <Button
@@ -1966,6 +2885,32 @@ const styles = StyleSheet.create({
         flex: 1,
         minWidth: 0,
     },
+    headerYearSlot: {
+        justifyContent: "center",
+        marginLeft: 8,
+    },
+    detailYearTrigger: {
+        minHeight: 32,
+        paddingHorizontal: 10,
+        borderRadius: 10,
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: "#EFF6FF",
+    },
+    detailEntityMenuHost: {
+        width: "100%",
+        alignItems: "center",
+        marginBottom: 8,
+    },
+    detailEntityTrigger: {
+        minHeight: 24,
+        paddingHorizontal: 4,
+        paddingVertical: 2,
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "center",
+    },
     content: {
         flexGrow: 1,
         paddingHorizontal: 16,
@@ -1980,6 +2925,14 @@ const styles = StyleSheet.create({
         minHeight: 220,
         alignItems: "center",
         justifyContent: "center",
+    },
+    quickStatusNotice: {
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+        borderRadius: 12,
+        backgroundColor: "#F8FAFC",
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: "#CBD5E1",
     },
     summaryCard: {
         minHeight: 88,
@@ -2070,16 +3023,165 @@ const styles = StyleSheet.create({
     },
     editableDetailText: {
         flex: 1,
+        minWidth: 0,
     },
-    photoSectionHeader: {
-        marginTop: 12,
-        marginBottom: 2,
+    relationshipSection: {
+        paddingVertical: 9,
+        borderBottomWidth: StyleSheet.hairlineWidth,
+        borderBottomColor: "#EAECF0",
+    },
+    relationshipFieldRow: {
+        paddingBottom: 4,
+    },
+    relationshipFieldHeader: {
+        minHeight: 30,
         flexDirection: "row",
         alignItems: "center",
         justifyContent: "space-between",
+        gap: 10,
+    },
+    relationshipHeaderIconButton: {
+        width: 30,
+        height: 30,
+        alignItems: "center",
+        justifyContent: "center",
+    },
+    relationshipItemCard: {
+        minHeight: 68,
+        marginTop: 4,
+        marginBottom: 2,
+        paddingHorizontal: 12,
+        paddingVertical: 12,
+        borderRadius: 10,
+        flexDirection: "row",
+        alignItems: "center",
+        borderWidth: StyleSheet.hairlineWidth,
+    },
+    relationshipItemContent: {
+        flex: 1,
+        minWidth: 0,
+    },
+    relationshipCardIconButton: {
+        width: 34,
+        height: 34,
+        marginLeft: 10,
+        borderRadius: 10,
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: "#EFF6FF",
+        borderWidth: 1,
+        borderColor: "#BFDBFE",
+    },
+    relationshipCardIconButtonDestructive: {
+        backgroundColor: "transparent",
+        borderColor: "transparent",
+    },
+    relationshipPressedOverlay: {
+        ...absoluteFill,
+        backgroundColor: "rgba(17, 24, 39, 0.05)",
+        borderRadius: 10,
+    },
+    relationshipPlaceholderButton: {
+        minHeight: 48,
+        marginTop: 4,
+        marginBottom: 2,
+        borderRadius: 12,
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: "#F8FAFC",
+        borderWidth: 1,
+        borderColor: "#CBD5E1",
+        borderStyle: "dashed",
+    },
+    relationshipParentRow: {
+        minHeight: 58,
+        marginTop: 8,
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+        borderRadius: 12,
+        flexDirection: "row",
+        alignItems: "center",
+        backgroundColor: "#F8FAFC",
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: "#CBD5E1",
+    },
+    relationshipChildrenHeader: {
+        minHeight: 32,
+        marginTop: 12,
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 10,
+    },
+    relationshipChildRow: {
+        minHeight: 50,
+        marginTop: 8,
+        paddingHorizontal: 12,
+        paddingVertical: 9,
+        borderRadius: 12,
+        flexDirection: "row",
+        alignItems: "center",
+        backgroundColor: "#FFFFFF",
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: "#CBD5E1",
+    },
+    relationshipInfoText: {
+        flex: 1,
+        minWidth: 0,
+        paddingRight: 8,
+    },
+    relationshipEmptyText: {
+        marginTop: 4,
+    },
+    relationshipSmallButton: {
+        minHeight: 30,
+        paddingHorizontal: 10,
+        borderRadius: 10,
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: "#EFF6FF",
+        borderWidth: 1,
+        borderColor: "#BFDBFE",
+    },
+    relationshipIconButton: {
+        width: 34,
+        height: 34,
+        borderRadius: 10,
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: "#FEF2F2",
+        borderWidth: 1,
+        borderColor: "#FECACA",
+    },
+    relationshipButtonDisabled: {
+        opacity: 0.55,
+    },
+    photoSection: {
+        paddingTop: 9,
+        paddingBottom: 16,
+        borderBottomWidth: StyleSheet.hairlineWidth,
+        borderBottomColor: "#EAECF0",
+    },
+    photoSectionHeader: {
+        minHeight: 30,
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 10,
+    },
+    photoSectionTitle: {
+        flex: 1,
+        minWidth: 0,
+    },
+    photoSectionCount: {
+        minWidth: 42,
+        flexShrink: 0,
+        textAlign: "right",
     },
     photoStrip: {
-        paddingTop: 8,
+        paddingTop: 4,
         paddingBottom: 4,
         gap: 12,
     },
@@ -2112,7 +3214,7 @@ const styles = StyleSheet.create({
     },
     addPhotoButton: {
         minHeight: 48,
-        marginTop: 12,
+        marginTop: 4,
         marginBottom: 4,
         borderRadius: 14,
         flexDirection: "row",
@@ -2121,6 +3223,7 @@ const styles = StyleSheet.create({
         backgroundColor: "#EFF6FF",
         borderWidth: 1,
         borderColor: "#BFDBFE",
+        borderStyle: "dashed"
     },
     addPhotoButtonDisabled: {
         opacity: 0.62,
@@ -2212,39 +3315,6 @@ const styles = StyleSheet.create({
         justifyContent: "center",
         backgroundColor: "#f2f2f2",
     },
-    photoSourceOverlay: {
-        flex: 1,
-        alignItems: "center",
-        justifyContent: "center",
-        paddingHorizontal: 20,
-        backgroundColor: "rgba(15, 23, 42, 0.46)",
-    },
-    photoSourcePanel: {
-        width: "100%",
-        maxWidth: 390,
-        padding: 18,
-        borderRadius: 20,
-        backgroundColor: "#FFFFFF",
-        shadowColor: PROPERTY_STATUS_CARD_SHADOW_COLOR,
-        shadowOffset: {
-            width: 0,
-            height: 8,
-        },
-        shadowOpacity: 0.16,
-        shadowRadius: 18,
-        elevation: 8,
-    },
-    photoSourceOption: {
-        minHeight: 56,
-        marginBottom: 10,
-        borderRadius: 14,
-        paddingHorizontal: 16,
-        flexDirection: "row",
-        alignItems: "center",
-        backgroundColor: "#EFF6FF",
-        borderWidth: 1,
-        borderColor: "#BFDBFE",
-    },
     areaPreviewSection: {
         paddingBottom: 12,
         marginBottom: 4,
@@ -2276,24 +3346,24 @@ const styles = StyleSheet.create({
         backgroundColor: "rgba(255, 255, 255, 0.5)",
     },
     areaPreviewSelectedOverlay: {
-        ...StyleSheet.absoluteFillObject,
+        ...absoluteFill,
         backgroundColor: "rgba(59, 130, 246, 0.28)",
     },
     areaPreviewLockedOverlay: {
-        ...StyleSheet.absoluteFillObject,
+        ...absoluteFill,
         backgroundColor: "rgba(34, 197, 94, 0.32)",
     },
     areaLockedBadge: {
-        ...StyleSheet.absoluteFillObject,
+        ...absoluteFill,
         alignItems: "center",
         justifyContent: "center",
     },
     areaLockedTouchOverlay: {
-        ...StyleSheet.absoluteFillObject,
+        ...absoluteFill,
         backgroundColor: "transparent",
     },
     areaCompletionFeedback: {
-        ...StyleSheet.absoluteFillObject,
+        ...absoluteFill,
         alignItems: "center",
         justifyContent: "center",
         backgroundColor: "rgba(187, 247, 208, 0.8)",
@@ -2364,6 +3434,42 @@ const styles = StyleSheet.create({
         borderRadius: 15,
         backgroundColor: "white",
     },
+    relationshipPickerContainer: {
+        height: "76%",
+    },
+    relationshipPickerList: {
+        flex: 1,
+        marginTop: 4,
+    },
+    relationshipPickerContent: {
+        paddingBottom: 8,
+    },
+    relationshipPickerEmptyContent: {
+        flexGrow: 1,
+    },
+    relationshipPickerEmpty: {
+        flex: 1,
+        minHeight: 160,
+        alignItems: "center",
+        justifyContent: "center",
+    },
+    relationshipCandidateRow: {
+        minHeight: 62,
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+        marginBottom: 8,
+        borderRadius: 12,
+        flexDirection: "row",
+        alignItems: "center",
+        backgroundColor: "#F8FAFC",
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: "#CBD5E1",
+    },
+    relationshipCandidateText: {
+        flex: 1,
+        minWidth: 0,
+        paddingRight: 8,
+    },
     modalHeaderRow: {
         width: "100%",
         flexDirection: "row",
@@ -2371,13 +3477,26 @@ const styles = StyleSheet.create({
         justifyContent: "space-between",
         marginTop: 5,
     },
+    modalHeaderTitle: {
+        flex: 1,
+        minWidth: 0,
+        paddingRight: 12,
+    },
     modalHeaderActions: {
         flexDirection: "row",
         alignItems: "center",
+        flexShrink: 0,
+    },
+    modalCharacterCount: {
+        minWidth: 64,
+        textAlign: "right",
+        flexShrink: 0,
     },
     modalUpdateButton: {
         flexDirection: "row",
         alignItems: "center",
+        flexShrink: 0,
+        marginLeft: 12,
     },
     modalReadOnlyScroll: {
         maxHeight: 363,

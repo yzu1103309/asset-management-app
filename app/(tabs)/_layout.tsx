@@ -59,7 +59,7 @@ export default function TabsLayout() {
                         tabBarIcon: ({ color }) => (
                             <TabBarIcon
                                 name={tab.icon}
-                                color={color}
+                                color={String(color)}
                                 family={tab.icon_type}
                             />
                         ),

@@ -63,7 +63,7 @@ export async function compressAndStorePropertyPhoto(
     const destinationFile = new File(getPhotoDirectory(), fileName);
 
     if (destinationFile.exists) destinationFile.delete();
-    sourceFile.copy(destinationFile);
+    await sourceFile.copy(destinationFile);
 
     try {
         if (sourceFile.exists) sourceFile.delete();

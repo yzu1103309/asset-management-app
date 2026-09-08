@@ -1,4 +1,10 @@
-import type {PropertyItem, PropertyItemsByBarcode} from "./propertyItemStore.ts";
+import {
+    getPropertyItemNumberForYear,
+    getPropertyItemYears,
+    type PropertyItem,
+    type PropertyItemsByBarcode,
+} from "./propertyItemStore.ts";
+import {itemExistsInPropertyYear} from "./propertyYears.ts";
 import VendorQRCodeModule from "qrcode-terminal/vendor/QRCode/index.js";
 import VendorQRErrorCorrectLevelModule from "qrcode-terminal/vendor/QRCode/QRErrorCorrectLevel.js";
 
@@ -33,14 +39,17 @@ function compareItemNumber(a: string, b: string): number {
 export function getPropertyLabelPrintItems(
     itemsByBarcode: PropertyItemsByBarcode,
     barcodeFilter?: string[],
+    options: {latestYearOnly?: boolean} = {},
 ): PropertyLabelPrintItem[] {
     const filterSet = barcodeFilter ? new Set(barcodeFilter) : null;
+    const latestYear = options.latestYearOnly ? getPropertyItemYears(itemsByBarcode)[0] ?? null : null;
     const items = Object.values(itemsByBarcode)
         .flat()
         .filter((item) => !filterSet || filterSet.has(item.barcode))
+        .filter((item) => !latestYear || itemExistsInPropertyYear(item.sourceYears, latestYear))
         .map((item) => ({
             barcode: item.barcode,
-            itemNumber: item.itemNumber,
+            itemNumber: getPropertyItemNumberForYear(item, latestYear),
             propertyName: item.propertyName,
             custodianName: item.custodianName ?? "",
         }));

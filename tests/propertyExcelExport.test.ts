@@ -78,6 +78,47 @@ test("builds Excel rows with per-entity annual statuses", () => {
     assert.equal(rows[1].statusesByYear["116"], "待處理");
 });
 
+test("exports item numbers from each annual source year", () => {
+    const rows = buildPropertyExcelRows({
+        "A-001": [
+            {
+                itemNumber: "1",
+                itemNumbersByYear: {
+                    "114": "1",
+                    "115": "8",
+                },
+                barcode: "A-001",
+                propertyName: "跨年度財產",
+                createdAt: "2026-01-01T00:00:00.000Z",
+                updatedAt: "2026-01-02T00:00:00.000Z",
+                sourceYears: ["114", "115"],
+                location: {
+                    areaId: null,
+                    areaName: null,
+                    description: null,
+                },
+                note: null,
+            },
+        ],
+    }, ["115", "114"], {
+        "114": {
+            unknown: [getPropertyStatusEntryKey("A-001", 0)],
+            checked: [],
+            pending: [],
+        },
+        "115": {
+            unknown: [getPropertyStatusEntryKey("A-001", 0)],
+            checked: [],
+            pending: [],
+        },
+    });
+    const xlsx = buildPropertyExcelXlsx(rows, ["115", "114"], new Date("2026-08-31T05:06:07"));
+    const decoded = new TextDecoder().decode(xlsx);
+
+    assert.match(decoded, /<c r="A2" s="0" t="inlineStr"><is><t>8<\/t><\/is><\/c>/);
+    assert.match(decoded, /<c r="A2" s="0" t="inlineStr"><is><t>1<\/t><\/is><\/c>/);
+});
+
 test("builds minimal xlsx workbook with annual worksheets and escaped user content", () => {
     const rows = buildPropertyExcelRows({
         "A-001": [

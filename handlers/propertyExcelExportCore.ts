@@ -1,10 +1,11 @@
-import type {PropertyItemsByBarcode} from "./propertyItemStore.ts";
+import {getPropertyItemNumberForYear, type PropertyItemsByBarcode} from "./propertyItemStore.ts";
 import {
     expandLegacyAnnualStatusEntries,
     parsePropertyStatusEntryKey,
     PROPERTY_STATUS_VALUES,
     type PropertyStatus,
 } from "./propertyStatusStore.ts";
+import {itemExistsInPropertyYear} from "./propertyYears.ts";
 
 const PROPERTY_STATUS_LABELS: Record<PropertyStatus, string> = {
     unknown: "未清點",
@@ -38,6 +39,7 @@ const COLUMN_WIDTHS = [8, 20, 34, 14, 12, 18, 30, 30] as const;
 
 export type PropertyExcelRow = {
     itemNumber: string;
+    itemNumbersByYear?: Record<string, string>;
     barcode: string;
     entityIndex: number;
     propertyName: string;
@@ -95,9 +97,13 @@ function compareItemNumber(a: string, b: string): number {
     return a.localeCompare(b, "zh-Hant", {numeric: true, sensitivity: "base"});
 }
 
-function sortRows(rows: PropertyExcelRow[]): PropertyExcelRow[] {
+function getRowItemNumber(row: PropertyExcelRow, year?: string): string {
+    return year ? row.itemNumbersByYear?.[year] ?? row.itemNumber : row.itemNumber;
+}
+
+function sortRows(rows: PropertyExcelRow[], year?: string): PropertyExcelRow[] {
     return [...rows].sort((a, b) => {
-        const itemNumberOrder = compareItemNumber(a.itemNumber, b.itemNumber);
+        const itemNumberOrder = compareItemNumber(getRowItemNumber(a, year), getRowItemNumber(b, year));
         if (itemNumberOrder !== 0) return itemNumberOrder;
 
         const barcodeOrder = a.barcode.localeCompare(b.barcode, "zh-Hant", {numeric: true, sensitivity: "base"});
@@ -158,7 +164,7 @@ export function buildPropertyExcelRows(
             const statusesByYear: Record<string, string> = {};
 
             for (const year of years) {
-                if (!item.sourceYears.includes(year)) {
+                if (!itemExistsInPropertyYear(item.sourceYears, year)) {
                     statusesByYear[year] = "";
                     continue;
                 }
@@ -168,7 +174,12 @@ export function buildPropertyExcelRows(
             }
 
             rows.push({
-                itemNumber: item.itemNumber,
+                itemNumber: getPropertyItemNumberForYear(item, years[0]),
+                itemNumbersByYear: Object.fromEntries(
+                    years
+                        .filter((year) => itemExistsInPropertyYear(item.sourceYears, year))
+                        .map((year) => [year, getPropertyItemNumberForYear(item, year)]),
+                ),
                 barcode: item.barcode,
                 entityIndex,
                 propertyName: item.propertyName,
@@ -181,7 +192,7 @@ export function buildPropertyExcelRows(
         });
     }
 
-    return sortRows(rows);
+    return sortRows(rows, years[0]);
 }
 
 function getColumnName(index: number): string {
@@ -220,12 +231,12 @@ function worksheetRow(
 }
 
 function getYearRows(rows: PropertyExcelRow[], year: string): PropertyExcelRow[] {
-    return rows.filter((row) => row.statusesByYear[year] !== "");
+    return sortRows(rows.filter((row) => row.statusesByYear[year] !== ""), year);
 }
 
 function getRowValues(row: PropertyExcelRow, year: string): unknown[] {
     return [
-        row.itemNumber,
+        getRowItemNumber(row, year),
         row.barcode,
         row.propertyName,
         row.custodianName,

@@ -23,6 +23,14 @@ import {
 import AndroidKeyboardAvoidingView from "@/components/AndroidKeyboardAvoidingView";
 import {centeredEdgeToEdgeModalProps} from "@/constants/centeredModal";
 
+const absoluteFill = {
+    position: "absolute" as const,
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+};
+
 type AreaLayoutPreviewModalProps = {
     visible: boolean;
     layout: AreaLayout | null;
@@ -347,11 +355,11 @@ const styles = StyleSheet.create({
         backgroundColor: "rgba(255, 255, 255, 0.86)",
     },
     missingOverlay: {
-        ...StyleSheet.absoluteFillObject,
+        ...absoluteFill,
         backgroundColor: "rgba(220, 38, 38, 0.35)",
     },
     selectedOverlay: {
-        ...StyleSheet.absoluteFillObject,
+        ...absoluteFill,
         backgroundColor: "rgba(37, 99, 235, 0.28)",
     },
 });

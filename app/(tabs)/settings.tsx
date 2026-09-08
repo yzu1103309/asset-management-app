@@ -11,7 +11,7 @@ import {useSafeAreaActionSheet} from "@/hooks/useSafeAreaActionSheet";
 import {clearAllLocalData} from "@/handlers/clearDatabase";
 import {useSpinner} from "@/context/SpinnerContext";
 import {MenuRow, Section, SettingRow} from "@/components/settings/SettingsRows";
-import {File} from "expo-file-system";
+import {File, type PickSingleFileOptions} from "expo-file-system";
 import {getStoredPropertyItems, importPropertyFileBytes} from "@/handlers/propertyImport";
 import {getPropertySpreadsheetSheetNames} from "@/handlers/propertySpreadsheetParser";
 import {getStoredAreaLayout, parseDrawioAreaLayout, saveAreaLayout, type AreaLayout} from "@/handlers/areaLayout";
@@ -43,6 +43,7 @@ import {
 } from "@/handlers/propertyBackup";
 
 type ProgressUpdate = BackupProgress | PropertyLabelPdfProgress;
+type AllPropertyLabelExportScope = "all" | "latest";
 
 type ProgressOperation = ProgressUpdate & {
     title: string;
@@ -64,6 +65,48 @@ function getErrorMessage(error: unknown): string | undefined {
         && typeof (error as { message?: unknown }).message === "string"
         ? (error as { message: string }).message
         : undefined;
+}
+
+type PickFileResultLike = {
+    canceled: boolean;
+    result: File | File[] | null;
+};
+
+function isPickFileResultLike(value: unknown): value is PickFileResultLike {
+    return typeof value === "object"
+        && value !== null
+        && "canceled" in value
+        && "result" in value;
+}
+
+function isFilePickerCancelError(error: unknown): boolean {
+    const message = getErrorMessage(error) ?? String(error);
+    return /cancel|cancelled|canceled|picker.*dismiss/i.test(message);
+}
+
+async function pickSingleFile(options?: PickSingleFileOptions): Promise<File | null> {
+    try {
+        const picked = await File.pickFileAsync(options);
+
+        if (Array.isArray(picked)) return picked[0] ?? null;
+        if (isPickFileResultLike(picked)) {
+            if (picked.canceled) return null;
+
+            const result = picked.result;
+            return Array.isArray(result) ? result[0] ?? null : result;
+        }
+
+        return picked ?? null;
+    } catch (error) {
+        if (isFilePickerCancelError(error)) return null;
+        throw error;
+    }
+}
+
+function waitForNextModalFrame(): Promise<void> {
+    return new Promise((resolve) => {
+        requestAnimationFrame(() => setTimeout(resolve, 0));
+    });
 }
 
 function toSerializableError(value: unknown, seen = new WeakSet<object>()): unknown {
@@ -178,6 +221,31 @@ function getAreaReferenceLabel(reference: BoundAreaReference): string {
 
 function getLabelConfirmItemKey(item: PropertyLabelPrintItem, index: number): string {
     return `${item.barcode}:${item.itemNumber}:${index}`;
+}
+
+function promptAllPropertyLabelExportScope(): Promise<AllPropertyLabelExportScope | null> {
+    return new Promise((resolve) => {
+        Alert.alert(
+            "輸出所有財產標籤",
+            "請選擇要輸出的財產範圍。",
+            [
+                {
+                    text: "取消",
+                    style: "cancel",
+                    onPress: () => resolve(null),
+                },
+                {
+                    text: "所有財產（包含已報廢）",
+                    onPress: () => resolve("all"),
+                },
+                {
+                    text: "僅最新年度存在之財產",
+                    onPress: () => resolve("latest"),
+                },
+            ],
+            {cancelable: true, onDismiss: () => resolve(null)},
+        );
+    });
 }
 
 export default function Settings()
@@ -351,13 +419,10 @@ export default function Settings()
         if (!currentAreaLayout && !(await confirmPropertyImportWithoutAreaLayout())) return;
 
         try {
-            const selectedFile = await File.pickFileAsync();
-            const file = Array.isArray(selectedFile) ? selectedFile[0] : selectedFile;
-
+            const file = await pickSingleFile();
             if (!file) return;
 
-            // SDK 54 exposes `name` at runtime, but its inherited File type does not declare it.
-            const sourceName = (file as File & {name?: string}).name;
+            const sourceName = file.name;
             const fileBytes = await file.bytes();
             const spreadsheetSingleSheetFallbackYear = await resolveSpreadsheetSingleSheetFallbackYear(fileBytes, sourceName);
             if (spreadsheetSingleSheetFallbackYear === null) return;
@@ -390,15 +455,19 @@ export default function Settings()
     }, [hideSpinner, showSpinner]);
 
     const handleAreaLayoutImport = useCallback(async () => {
-        try {
-            showSpinner({locked: true});
-            const selectedFile = await File.pickFileAsync();
-            const file = Array.isArray(selectedFile) ? selectedFile[0] : selectedFile;
+        let spinnerShown = false;
 
+        try {
+            const file = await pickSingleFile({mimeTypes: ["application/xml", "text/xml", "text/plain", "*/*"]});
             if (!file) return;
 
-            const sourceName = (file as File & {name?: string}).name;
+            showSpinner({locked: true});
+            spinnerShown = true;
+            const sourceName = file.name;
             const layout = parseDrawioAreaLayout(await file.text(), sourceName);
+            hideSpinner({force: true});
+            spinnerShown = false;
+            await waitForNextModalFrame();
             setAreaLayoutPreview(layout);
         } catch (error) {
             const message = getErrorMessage(error) ?? "無法讀取或解析此 drawio 檔案。";
@@ -407,7 +476,7 @@ export default function Settings()
             console.error("空間配置匯入失敗:", error);
             Alert.alert("匯入失敗", message);
         } finally {
-            hideSpinner({force: true});
+            if (spinnerShown) hideSpinner({force: true});
         }
     }, [hideSpinner, showSpinner]);
 
@@ -562,24 +631,20 @@ export default function Settings()
 
     const handlePropertyLabelPdfExport = useCallback(async (mode: "all" | "queued") => {
         let labels: PropertyLabelPrintItem[] = [];
+        let itemsByBarcode: Awaited<ReturnType<typeof getStoredPropertyItems>> | null = null;
+        let queuedBarcodes: string[] | undefined;
 
         try {
             showSpinner({locked: true});
-            const [itemsByBarcode, queuedBarcodes] = await Promise.all([
+            const [storedItems, storedQueuedBarcodes] = await Promise.all([
                 getStoredPropertyItems(),
                 mode === "queued" ? getPropertyLabelQueue() : Promise.resolve(undefined),
             ]);
+            itemsByBarcode = storedItems;
+            queuedBarcodes = storedQueuedBarcodes;
 
             if (mode === "queued" && queuedBarcodes?.length === 0) {
                 Alert.alert("沒有待製作標籤", "目前尚未加入任何待製作財產標籤。");
-                return;
-            }
-
-            labels = getPropertyLabelPrintItems(itemsByBarcode, queuedBarcodes);
-            if (labels.length === 0) {
-                Alert.alert("沒有可輸出的資料", mode === "queued"
-                    ? "待製作清單中的財產編號找不到對應資料。"
-                    : "請先匯入財產資料。");
                 return;
             }
         } catch (error) {
@@ -588,6 +653,24 @@ export default function Settings()
             return;
         } finally {
             hideSpinner({force: true});
+        }
+
+        if (!itemsByBarcode) return;
+
+        if (mode === "all") {
+            const scope = await promptAllPropertyLabelExportScope();
+            if (!scope) return;
+
+            labels = getPropertyLabelPrintItems(itemsByBarcode, undefined, {latestYearOnly: scope === "latest"});
+        } else {
+            labels = getPropertyLabelPrintItems(itemsByBarcode, queuedBarcodes);
+        }
+
+        if (labels.length === 0) {
+            Alert.alert("沒有可輸出的資料", mode === "queued"
+                ? "待製作清單中的財產編號找不到對應資料。"
+                : "請先匯入財產資料。");
+            return;
         }
 
         if (mode === "queued") {
@@ -690,11 +773,17 @@ export default function Settings()
     const handlePropertyExcelExport = useCallback(async () => {
         let exportedExcel: PropertyExcelExportResult | null = null;
         let shouldCleanupExportedExcel = false;
+        let spinnerShown = false;
 
         try {
             showSpinner({locked: true});
+            spinnerShown = true;
             exportedExcel = await createPropertyExcelFile();
             shouldCleanupExportedExcel = true;
+
+            hideSpinner({force: true});
+            spinnerShown = false;
+            await waitForNextModalFrame();
 
             const shared = await sharePropertyExcelFile(exportedExcel.uri);
             shouldCleanupExportedExcel = shared;
@@ -708,12 +797,17 @@ export default function Settings()
         } catch (error) {
             const message = getErrorMessage(error) ?? "無法匯出 Excel 檔，請稍後再試。";
             console.error("匯出 Excel 檔失敗:", error);
+            if (spinnerShown) {
+                hideSpinner({force: true});
+                spinnerShown = false;
+                await waitForNextModalFrame();
+            }
             Alert.alert("匯出失敗", message);
         } finally {
             if (exportedExcel && shouldCleanupExportedExcel) {
                 cleanupPropertyExcelFile(exportedExcel);
             }
-            hideSpinner({force: true});
+            if (spinnerShown) hideSpinner({force: true});
         }
     }, [hideSpinner, showSpinner]);
 
@@ -787,8 +881,7 @@ export default function Settings()
 
     const handleBackupImport = useCallback(async () => {
         try {
-            const selectedFile = await File.pickFileAsync();
-            const file = Array.isArray(selectedFile) ? selectedFile[0] : selectedFile;
+            const file = await pickSingleFile({mimeTypes: ["application/octet-stream", "application/json", "*/*"]});
             if (!file) return;
 
             if (!(await confirmBackupRestoreOverwrite())) return;

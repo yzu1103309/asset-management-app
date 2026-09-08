@@ -4,6 +4,14 @@ import {Text} from "react-native-magnus";
 import type {PropertyStatus} from "@/handlers/propertyStatusStore";
 import {PROPERTY_STATUS_CARD_SHADOW_COLOR, PROPERTY_STATUS_COLORS} from "@/constants/propertyStatusColors";
 
+const absoluteFill = {
+    position: "absolute" as const,
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+};
+
 type ItemCardProps = {
     itemNumber: string;
     barcode: string;
@@ -84,7 +92,7 @@ const styles = StyleSheet.create({
         flex: 1,
     },
     pressedOverlay: {
-        ...StyleSheet.absoluteFillObject,
+        ...absoluteFill,
         backgroundColor: "rgba(17, 24, 39, 0.05)",
         borderRadius: 10,
     },

@@ -2,7 +2,6 @@ import {useEffect, useMemo, useRef, useState} from "react";
 import {
     ActivityIndicator,
     FlatList,
-    InteractionManager,
     Keyboard,
     Platform,
     StyleSheet,
@@ -19,27 +18,41 @@ import {getBottomModalSafeAreaPadding} from "@/constants/bottomModalSafeArea";
 import ItemCard from "@/components/main/ItemCard";
 import {
     getAnnualPropertyItems,
-    getAvailablePropertyYears,
     sortAnnualPropertyListItems,
     type AnnualPropertyListItem,
 } from "@/handlers/propertyList";
 import {searchPropertyItems} from "@/handlers/propertySearch";
 import {PROPERTY_STATUS_VALUES} from "@/handlers/propertyStatusStore";
+import {usePropertyYear} from "@/context/PropertyYearContext";
 
 type SearchModalProps = {
     visible: boolean;
     onClose: () => void;
     onNavigate: (shouldReopenOnReturn: boolean) => void;
 };
+type CancelableTask = {cancel: () => void};
+type IdleApi = typeof globalThis & {
+    requestIdleCallback?: (callback: () => void, options?: {timeout?: number}) => number;
+    cancelIdleCallback?: (handle: number) => void;
+};
+let persistedSearchKeyword = "";
 
-function getLatestYear(years: string[]): string | null {
-    return [...years].sort((a, b) => Number(b) - Number(a))[0] ?? null;
+function runWhenIdle(callback: () => void): CancelableTask {
+    const idleApi = globalThis as IdleApi;
+    if (typeof idleApi.requestIdleCallback === "function") {
+        const handle = idleApi.requestIdleCallback(callback, {timeout: 300});
+        return {cancel: () => idleApi.cancelIdleCallback?.(handle)};
+    }
+
+    const timeout = setTimeout(callback, 16);
+    return {cancel: () => clearTimeout(timeout)};
 }
 
 export default function SearchModal({visible, onClose, onNavigate}: SearchModalProps) {
     const insets = useSafeAreaInsets();
+    const {selectedYear} = usePropertyYear();
     const bottomModalSafeAreaPadding = getBottomModalSafeAreaPadding(insets.bottom);
-    const [keyword, setKeyword] = useState("");
+    const [keyword, setKeyword] = useState(() => persistedSearchKeyword);
     const [items, setItems] = useState<AnnualPropertyListItem[]>([]);
     const [sourceYear, setSourceYear] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
@@ -55,14 +68,13 @@ export default function SearchModal({visible, onClose, onNavigate}: SearchModalP
 
         let mounted = true;
 
-        const loadTask = InteractionManager.runAfterInteractions(() => {
+        const loadTask = runWhenIdle(() => {
             void (async () => {
                 setLoading(true);
                 setLoadError(null);
 
                 try {
-                    const latestYear = getLatestYear(await getAvailablePropertyYears());
-                    if (!latestYear) {
+                    if (!selectedYear) {
                         if (mounted) {
                             setSourceYear(null);
                             setItems([]);
@@ -71,11 +83,11 @@ export default function SearchModal({visible, onClose, onNavigate}: SearchModalP
                     }
 
                     const annualItems = (await Promise.all(
-                        PROPERTY_STATUS_VALUES.map((status) => getAnnualPropertyItems(latestYear, status)),
+                        PROPERTY_STATUS_VALUES.map((status) => getAnnualPropertyItems(selectedYear, status)),
                     )).flat();
 
                     if (mounted) {
-                        setSourceYear(latestYear);
+                        setSourceYear(selectedYear);
                         setItems(sortAnnualPropertyListItems(annualItems));
                     }
                 } catch (error) {
@@ -95,7 +107,7 @@ export default function SearchModal({visible, onClose, onNavigate}: SearchModalP
             mounted = false;
             loadTask.cancel();
         };
-    }, [modalReadyForDataLoad, visible]);
+    }, [modalReadyForDataLoad, selectedYear, visible]);
 
     const trimmedKeyword = keyword.trim();
     const shouldAutoFocusInput = visible && keyword.length === 0;
@@ -105,8 +117,13 @@ export default function SearchModal({visible, onClose, onNavigate}: SearchModalP
         return searchPropertyItems(trimmedKeyword, items);
     }, [items, trimmedKeyword]);
 
+    const updateKeyword = (nextKeyword: string) => {
+        persistedSearchKeyword = nextKeyword;
+        setKeyword(nextKeyword);
+    };
+
     const clearKeyword = () => {
-        setKeyword("");
+        updateKeyword("");
         requestAnimationFrame(() => {
             inputRef.current?.focus?.();
         });
@@ -167,6 +184,7 @@ export default function SearchModal({visible, onClose, onNavigate}: SearchModalP
                         barcode: pendingItem.barcode,
                         entityIndex: String(pendingItem.entityIndex),
                         status: pendingItem.status,
+                        ...(selectedYear ? {year: selectedYear} : {}),
                     },
                 });
             }}
@@ -193,7 +211,7 @@ export default function SearchModal({visible, onClose, onNavigate}: SearchModalP
                             ref={inputRef}
                             autoFocus={shouldAutoFocusInput}
                             value={keyword}
-                            onChangeText={setKeyword}
+                            onChangeText={updateKeyword}
                             fontSize="xl"
                             borderColor="gray400"
                             placeholder="輸入品名、項次或財產編號"

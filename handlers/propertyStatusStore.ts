@@ -1,5 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import type {PropertyItemsByBarcode} from "./propertyItemStore.ts";
+import {itemExistsInPropertyYear} from "./propertyYears.ts";
 
 export const PROPERTY_STATUS_VALUES = ["unknown", "checked", "pending"] as const;
 const PROPERTY_STATUS_ENTITY_KEY_SEPARATOR = "::entity:";
@@ -40,7 +41,7 @@ export function getPropertyStatusEntryKeysForBarcode(barcode: string, entityCoun
 export function getAnnualPropertyStatusEntryKeysForItems(itemsByBarcode: PropertyItemsByBarcode, year: string): string[] {
     return Object.entries(itemsByBarcode).flatMap(([barcode, items]) => (
         items.flatMap((item, entityIndex) => (
-            item.sourceYears.includes(year) ? [getPropertyStatusEntryKey(barcode, entityIndex)] : []
+            itemExistsInPropertyYear(item.sourceYears, year) ? [getPropertyStatusEntryKey(barcode, entityIndex)] : []
         ))
     ));
 }

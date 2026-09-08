@@ -3,11 +3,8 @@ import {
     StyleSheet,
     Alert,
     Linking,
-    InteractionManager,
     TouchableOpacity,
     ActivityIndicator,
-    Modal,
-    Platform,
     PanResponder,
     AppState,
     type AppStateStatus,
@@ -15,13 +12,18 @@ import {
 } from "react-native";
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import {router, useFocusEffect} from "expo-router";
-import {Picker as RNPicker} from "@react-native-picker/picker";
-import {useSpinner} from "@/context/SpinnerContext";
 import {memo, useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {Text, Button, Icon, Div} from "react-native-magnus";
 import {useSafeAreaInsets} from "react-native-safe-area-context";
 import SearchModal from "@/components/SearchModal";
-import {getAvailablePropertyYears} from "@/handlers/propertyList";
+import PropertyYearDropdown from "@/components/PropertyYearDropdown";
+import {usePropertyYear} from "@/context/PropertyYearContext";
+import {getPropertyItemsByBarcode} from "@/handlers/propertyList";
+import {
+    comparePropertyYearsDescending,
+    itemExistsInPropertyYear,
+    propertyYearToWesternNumber,
+} from "@/handlers/propertyYears";
 
 const CAMERA_IDLE_TIMEOUT_MS = 60 * 1000;
 const CAMERA_READY_RETRY_MS = 1500;
@@ -45,6 +47,33 @@ const SCANNER_CAMERA_DEBUG_ZOOM_OPTIONS = [
     {label: "0.2", value: 0.2},
     {label: "0.3", value: 0.3},
 ];
+const absoluteFill = {
+    position: "absolute" as const,
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+};
+type CancelableTask = {cancel: () => void};
+type IdleApi = typeof globalThis & {
+    requestIdleCallback?: (callback: () => void, options?: {timeout?: number}) => number;
+    cancelIdleCallback?: (handle: number) => void;
+};
+
+function runWhenIdle(callback: () => void): CancelableTask {
+    const idleApi = globalThis as IdleApi;
+    if (typeof idleApi.requestIdleCallback === "function") {
+        const handle = idleApi.requestIdleCallback(callback, {timeout: 300});
+        return {cancel: () => idleApi.cancelIdleCallback?.(handle)};
+    }
+
+    const timeout = setTimeout(callback, 16);
+    return {cancel: () => clearTimeout(timeout)};
+}
+
+function getItemSourceYears(items: Awaited<ReturnType<typeof getPropertyItemsByBarcode>>): string[] {
+    return [...new Set(items.flatMap((item) => item.sourceYears))].sort(comparePropertyYearsDescending);
+}
 
 const clampCameraZoom = (zoom: number) => {
     const clamped = Math.min(SCANNER_CAMERA_DEBUG_MAX_ZOOM, Math.max(SCANNER_CAMERA_DEBUG_MIN_ZOOM, zoom));
@@ -108,23 +137,19 @@ export default function Scanner() {
     const [debugZoom, setDebugZoom] = useState(DEFAULT_SCANNER_CAMERA_ZOOM);
     const [debugZoomTrackWidth, setDebugZoomTrackWidth] = useState(0);
     const [modalVisible, setModalVisible] = useState(false);
-    const [yearModalVisible, setYearModalVisible] = useState(false);
-    const [availableYears, setAvailableYears] = useState<string[]>([]);
-    const [yearsLoading, setYearsLoading] = useState(true);
-    const [selectedYear, setSelectedYear] = useState<string | null>(null);
-    const [draftYear, setDraftYear] = useState("");
+    const {availableYears, selectedYear, loading: yearsLoading, refreshYears} = usePropertyYear();
     const [scanned, setScanned] = useState("")
-    const availableYearsCountRef = useRef(0);
     const reopenSearchOnFocusRef = useRef(false);
     const searchOpenRequestIdRef = useRef(0);
-    const pauseCameraTaskRef = useRef<{cancel: () => void} | null>(null);
-    const resumeCameraTaskRef = useRef<{cancel: () => void} | null>(null);
+    const pauseCameraTaskRef = useRef<CancelableTask | null>(null);
+    const resumeCameraTaskRef = useRef<CancelableTask | null>(null);
     const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const idleAlertVisibleRef = useRef(false);
     const appStateRef = useRef<AppStateStatus>(AppState.currentState);
     const scannerFocusedRef = useRef(false);
     const permissionMissingLogKeyRef = useRef<string | null>(null);
     const selectedLensRef = useRef<string | undefined>(undefined);
+    const barcodeScanHandlingRef = useRef(false);
     const cameraReadyRetryCountRef = useRef(0);
     const debugZoomDragStartRef = useRef(DEFAULT_SCANNER_CAMERA_ZOOM);
     const insets = useSafeAreaInsets()
@@ -180,7 +205,7 @@ export default function Scanner() {
         setIsCameraActive(false);
         setIsCameraLoading(true);
 
-        resumeCameraTaskRef.current = InteractionManager.runAfterInteractions(() => {
+        resumeCameraTaskRef.current = runWhenIdle(() => {
             setIsCameraActive(true);
             if (restartSession) {
                 setCameraSessionKey((key) => key + 1);
@@ -198,7 +223,6 @@ export default function Scanner() {
             !isScannerFocused ||
             !isCameraActive ||
             modalVisible ||
-            yearModalVisible ||
             !permission?.granted
         ) return;
 
@@ -233,7 +257,7 @@ export default function Scanner() {
                 ],
             );
         }, CAMERA_IDLE_TIMEOUT_MS);
-    }, [activateCamera, hasImportedPropertyYears, isAppActive, isCameraActive, isScannerFocused, modalVisible, pauseCamera, permission?.granted, yearModalVisible, yearsLoading]);
+    }, [activateCamera, hasImportedPropertyYears, isAppActive, isCameraActive, isScannerFocused, modalVisible, pauseCamera, permission?.granted, yearsLoading]);
 
     const openSearchModal = useCallback(() => {
         reopenSearchOnFocusRef.current = false;
@@ -262,42 +286,18 @@ export default function Scanner() {
     }, [queueCameraActivation]);
 
     const refreshAvailableYears = useCallback(async () => {
-        if (availableYearsCountRef.current === 0) {
-            setYearsLoading(true);
+        await refreshYears();
+    }, [refreshYears]);
+
+    const pauseForYearSelection = useCallback(() => {
+        pauseCamera("year_dropdown_opened");
+    }, [pauseCamera]);
+
+    const resumeAfterYearSelection = useCallback(() => {
+        if (scannerFocusedRef.current && !modalVisible) {
+            queueCameraActivation("year_dropdown_closed", false);
         }
-
-        try {
-            const years = await getAvailablePropertyYears();
-            availableYearsCountRef.current = years.length;
-            setAvailableYears(years);
-            setSelectedYear((currentYear) => currentYear && years.includes(currentYear)
-                ? currentYear
-                : years[0] ?? null);
-        } catch (error) {
-            console.error("讀取可用盤點年度失敗:", error);
-            availableYearsCountRef.current = 0;
-            setAvailableYears([]);
-            setSelectedYear(null);
-        } finally {
-            setYearsLoading(false);
-        }
-    }, []);
-
-    const openYearModal = useCallback(() => {
-        setDraftYear(selectedYear ?? availableYears[0] ?? "");
-        setYearModalVisible(true);
-        pauseCamera("year_modal_opened");
-    }, [availableYears, pauseCamera, selectedYear]);
-
-    const closeYearModal = useCallback(() => {
-        setYearModalVisible(false);
-        queueCameraActivation("year_modal_closed");
-    }, [queueCameraActivation]);
-
-    const confirmYearSelection = useCallback(() => {
-        if (draftYear) setSelectedYear(draftYear);
-        closeYearModal();
-    }, [closeYearModal, draftYear]);
+    }, [modalVisible, queueCameraActivation]);
 
     const handleSearchNavigation = useCallback((shouldReopenOnReturn: boolean) => {
         reopenSearchOnFocusRef.current = shouldReopenOnReturn;
@@ -391,7 +391,7 @@ export default function Scanner() {
                 return;
             }
 
-            if (!wasActive && scannerFocusedRef.current && !modalVisible && !yearModalVisible) {
+            if (!wasActive && scannerFocusedRef.current && !modalVisible) {
                 queueCameraActivation("app_state_active");
             }
         };
@@ -399,7 +399,7 @@ export default function Scanner() {
         const subscription = AppState.addEventListener("change", handleAppStateChange);
 
         return () => subscription.remove();
-    }, [modalVisible, pauseCamera, queueCameraActivation, yearModalVisible]);
+    }, [modalVisible, pauseCamera, queueCameraActivation]);
 
     useEffect(() => {
         return () => {
@@ -410,7 +410,7 @@ export default function Scanner() {
         };
     }, []);
 
-    const shouldMountCamera = !!permission?.granted && hasImportedPropertyYears && !yearsLoading && isAppActive && isScannerFocused && !modalVisible && !yearModalVisible && isCameraActive;
+    const shouldMountCamera = !!permission?.granted && hasImportedPropertyYears && !yearsLoading && isAppActive && isScannerFocused && !modalVisible && isCameraActive;
     const effectiveSelectedLens = SCANNER_CAMERA_DEBUG_CONTROLS && debugSelectedLens !== AUTO_CAMERA_LENS
         ? debugSelectedLens
         : autoSelectedLens;
@@ -471,8 +471,6 @@ export default function Scanner() {
         return clearCameraIdleTimer;
     }, [resetCameraIdleTimer]);
 
-    const {showSpinner, hideSpinner} = useSpinner()
-
     // on barcode scanned logic
     useEffect(() => {
         (async () => {
@@ -489,9 +487,66 @@ export default function Scanner() {
     }, [scanned, selectedYear]);
 
     const navigate = useCallback((isbn: string) => {
+        if (barcodeScanHandlingRef.current) return;
+
+        barcodeScanHandlingRef.current = true;
         clearCameraIdleTimer();
-        setScanned(isbn)
-    }, []);
+
+        void (async () => {
+            let shouldReleaseScanner = true;
+
+            try {
+                if (selectedYear) {
+                    const scannedItems = await getPropertyItemsByBarcode(isbn);
+                    const sourceYears = getItemSourceYears(scannedItems);
+                    const existsInSelectedYear = sourceYears.length === 0
+                        || itemExistsInPropertyYear(sourceYears, selectedYear);
+
+                    if (!existsInSelectedYear) {
+                        const selectedWesternYear = propertyYearToWesternNumber(selectedYear);
+                        const sourceWesternYears = sourceYears
+                            .map(propertyYearToWesternNumber)
+                            .filter((year): year is number => year !== null);
+                        const sourceYearText = sourceYears.length > 0 ? sourceYears.join("、") : "其他";
+                        const releaseScanner = () => {
+                            barcodeScanHandlingRef.current = false;
+                        };
+
+                        shouldReleaseScanner = false;
+                        setScanned(isbn);
+                        if (selectedWesternYear !== null && sourceWesternYears.some((year) => year > selectedWesternYear)) {
+                            Alert.alert(
+                                "不屬於目前盤點年度",
+                                `目前正在盤點 ${selectedYear} 年度。\n此財產可能於 ${sourceYearText} 年新增。\n\n僅顯示該年度的盤點狀態。`,
+                                [{text: "知道了", onPress: releaseScanner}],
+                                {cancelable: true, onDismiss: releaseScanner},
+                            );
+                            return;
+                        }
+
+                        Alert.alert(
+                            "不屬於目前盤點年度",
+                            `目前正在盤點 ${selectedYear} 年度。\n此財產可能已於 ${sourceYearText} 年報廢。\n\n僅顯示該年度的盤點狀態。`,
+                            [{text: "知道了", onPress: releaseScanner}],
+                            {cancelable: true, onDismiss: releaseScanner},
+                        );
+                        return;
+                    }
+                }
+
+                setScanned(isbn);
+            } catch (error) {
+                console.error("檢查掃描財產年度失敗:", error);
+                setScanned(isbn);
+            } finally {
+                if (shouldReleaseScanner) {
+                    setTimeout(() => {
+                        barcodeScanHandlingRef.current = false;
+                    }, 600);
+                }
+            }
+        })();
+    }, [selectedYear]);
 
     const resolvePreferredBackLens = useCallback((lenses: string[]) => {
         console.log("Available Lenses: ", lenses)
@@ -541,21 +596,6 @@ export default function Scanner() {
     }, [effectiveCameraZoom]);
 
     useEffect(() => {
-        if (yearsLoading || !hasImportedPropertyYears) {
-            hideSpinner();
-            return;
-        }
-
-        if (!permission || (permission?.granted && isCameraLoading)) {
-            // Camera permissions are still loading,
-            // or permission granted but camera still loading.
-            showSpinner();
-        } else {
-            hideSpinner();
-        }
-    }, [hasImportedPropertyYears, hideSpinner, isCameraLoading, permission, showSpinner, yearsLoading]);
-
-    useEffect(() => {
         if (!permission || permission.granted) return;
 
         const logKey = `${permission.status}:${permission.canAskAgain}`;
@@ -572,66 +612,6 @@ export default function Scanner() {
             無法掃描？嘗試手動搜尋
         </Button>
     ), [openSearchModal]);
-
-    const yearHintText = selectedYear
-        ? `${selectedYear} 年度`
-        : availableYears.length > 0 ? "請選擇盤點年度" : "尚未匯入盤點年度";
-    const yearModalComp = useMemo(() => (
-        <Modal
-            transparent
-            visible={yearModalVisible}
-            animationType="fade"
-            onRequestClose={closeYearModal}
-        >
-            <TouchableOpacity
-                activeOpacity={1}
-                style={styles.yearPickerModalBackdrop}
-                onPress={closeYearModal}
-            >
-                <View
-                    style={styles.yearPickerModalPanel}
-                    onStartShouldSetResponder={() => true}
-                >
-                    <Text fontSize="xl" fontWeight="bold" color="gray900" textAlign="center">
-                        選擇盤點年度
-                    </Text>
-                    <Text mt={6} mb={10} fontSize="md" color="gray600" textAlign="center">
-                        掃描後會以此年度判斷與更新盤點狀態
-                    </Text>
-                    <View style={styles.yearPickerContainer}>
-                        <RNPicker
-                            selectedValue={draftYear}
-                            onValueChange={(value) => {
-                                if (typeof value === "string") setDraftYear(value);
-                            }}
-                            style={styles.yearPicker}
-                            itemStyle={styles.yearPickerItem}
-                        >
-                            {availableYears.map((year) => (
-                                <RNPicker.Item key={year} label={`${year} 年度`} value={year} />
-                            ))}
-                        </RNPicker>
-                    </View>
-                    <View style={styles.yearPickerModalActions}>
-                        <TouchableOpacity
-                            activeOpacity={0.78}
-                            onPress={closeYearModal}
-                            style={[styles.yearPickerModalActionButton, styles.yearPickerModalCancelButton]}
-                        >
-                            <Text fontSize="md" fontWeight="bold" color="gray700">取消</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                            activeOpacity={0.78}
-                            onPress={confirmYearSelection}
-                            style={[styles.yearPickerModalActionButton, styles.yearPickerModalDoneButton]}
-                        >
-                            <Text fontSize="md" fontWeight="bold" color="white">完成</Text>
-                        </TouchableOpacity>
-                    </View>
-                </View>
-            </TouchableOpacity>
-        </Modal>
-    ), [availableYears, closeYearModal, confirmYearSelection, draftYear, yearModalVisible]);
 
     const modalComp = useMemo(() => (<SearchModal
         visible={modalVisible}
@@ -708,36 +688,13 @@ export default function Scanner() {
             <View style={styles.headerBlock}>
                 <Text style={styles.scannerTitle}>請掃描財產標籤上的條碼</Text>
                 <Div row justifyContent="center" alignItems="center" style={styles.yearHintRow}>
-                    {availableYears.length > 0 && (
-                        <Text fontSize="sm" color="gray600" mr="xs" style={styles.yearHintText}>
-                            目前正在盤點
-                        </Text>
-                    )}
-                    <TouchableOpacity
-                        activeOpacity={0.75}
-                        disabled={availableYears.length === 0}
-                        onPress={openYearModal}
-                        style={[styles.yearHintButton, availableYears.length === 0 && styles.yearHintButtonDisabled]}
-                    >
-                        <Text
-                            fontSize="sm"
-                            fontWeight="bold"
-                            color={availableYears.length === 0 ? "gray500" : "blue600"}
-                            style={styles.yearHintText}
-                        >
-                            {yearHintText}
-                        </Text>
-                        {availableYears.length > 0 && (
-                            <Icon
-                                name="chevron-down"
-                                fontFamily="Feather"
-                                color="blue600"
-                                fontSize="md"
-                                ml="xs"
-                                mb={Platform.OS === "android" ? 1 : 0}
-                            />
-                        )}
-                    </TouchableOpacity>
+                    <PropertyYearDropdown
+                        compact
+                        prefix="目前正在盤點"
+                        disabledLabel="尚未匯入盤點年度"
+                        onBeforeSelect={pauseForYearSelection}
+                        onAfterSelect={resumeAfterYearSelection}
+                    />
                 </Div>
             </View>
             <View style={styles.cameraFrame}>
@@ -896,7 +853,6 @@ export default function Scanner() {
             )}
             {searchButton}
             {modalComp}
-            {yearModalComp}
         </View>
     );
 }
@@ -973,75 +929,6 @@ const styles = StyleSheet.create({
     yearHintRow: {
         marginTop: 6,
     },
-    yearHintText: {
-        lineHeight: 18,
-        includeFontPadding: false,
-        textAlignVertical: "center",
-    },
-    yearHintButton: {
-        minHeight: 24,
-        paddingHorizontal: 10,
-        paddingVertical: 2,
-        borderRadius: 999,
-        flexDirection: "row",
-        alignItems: "center",
-        justifyContent: "center",
-        backgroundColor: "#EFF6FF",
-    },
-    yearHintButtonDisabled: {
-        backgroundColor: "#F3F4F6",
-    },
-    yearPickerModalBackdrop: {
-        flex: 1,
-        alignItems: "center",
-        justifyContent: "center",
-        paddingHorizontal: 22,
-        backgroundColor: "rgba(15, 23, 42, 0.46)",
-    },
-    yearPickerModalPanel: {
-        width: "100%",
-        maxWidth: 390,
-        padding: 18,
-        borderRadius: 20,
-        backgroundColor: "#FFFFFF",
-        shadowColor: "#64748B",
-        shadowOffset: {
-            width: 0,
-            height: 8,
-        },
-        shadowOpacity: 0.16,
-        shadowRadius: 18,
-        elevation: 8,
-    },
-    yearPickerContainer: {
-        height: 166,
-        justifyContent: "center",
-        overflow: "hidden",
-    },
-    yearPicker: {
-        width: "100%",
-    },
-    yearPickerItem: {
-        fontSize: 18,
-    },
-    yearPickerModalActions: {
-        flexDirection: "row",
-        gap: 10,
-        marginTop: 12,
-    },
-    yearPickerModalActionButton: {
-        flex: 1,
-        minHeight: 44,
-        borderRadius: 12,
-        alignItems: "center",
-        justifyContent: "center",
-    },
-    yearPickerModalCancelButton: {
-        backgroundColor: "#F3F4F6",
-    },
-    yearPickerModalDoneButton: {
-        backgroundColor: "#2563EB",
-    },
     camera: {
         width: "100%",
         height: "100%",
@@ -1067,21 +954,21 @@ const styles = StyleSheet.create({
         backgroundColor: "#111827",
     },
     cameraLoadingOverlay: {
-        ...StyleSheet.absoluteFillObject,
+        ...absoluteFill,
         alignItems: "center",
         justifyContent: "center",
         backgroundColor: "#111827",
         borderRadius: 15,
     },
     cameraSleepOverlay: {
-        ...StyleSheet.absoluteFillObject,
+        ...absoluteFill,
         alignItems: "center",
         justifyContent: "center",
         backgroundColor: "rgba(17, 24, 39, 0.88)",
         borderRadius: 15,
     },
     scanGuideOverlay: {
-        ...StyleSheet.absoluteFillObject,
+        ...absoluteFill,
         alignItems: "center",
         justifyContent: "center",
         paddingHorizontal: 18,

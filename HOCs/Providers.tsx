@@ -7,6 +7,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import * as NavigationBar from 'expo-navigation-bar';
 import {Platform} from "react-native";
 import {useEffect} from "react";
+import {PropertyYearProvider} from "@/context/PropertyYearContext";
 
 interface ProvidersProps {
     children: React.ReactNode;
@@ -25,9 +26,11 @@ export default function Providers({ children }: ProvidersProps) {
                     <ThemeProvider>
                         <PromptProvider>
                             <SpinnerProvider>
-                                <ActionSheetProvider>
-                                    {children}
-                                </ActionSheetProvider>
+                                <PropertyYearProvider>
+                                    <ActionSheetProvider>
+                                        {children}
+                                    </ActionSheetProvider>
+                                </PropertyYearProvider>
                             </SpinnerProvider>
                         </PromptProvider>
                     </ThemeProvider>

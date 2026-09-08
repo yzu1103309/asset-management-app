@@ -11,7 +11,7 @@ import {PROPERTY_TEXT_SUGGESTIONS_STORAGE_KEY} from "./propertyTextSuggestions.t
 
 const BACKUP_MAGIC = "astalog-full-backup";
 const BACKUP_VERSION = 1;
-const BACKUP_FILE_EXTENSION = "bast";
+const BACKUP_FILE_EXTENSION = "astb";
 const PROPERTY_PHOTO_DIRECTORY_NAME = "property-photos";
 const APP_STORAGE_PREFIX = "@ncu-property-checking/";
 const PROPERTY_STATUS_STORAGE_KEY_PATTERN = new RegExp(`^\\d{3,4}_(${PROPERTY_STATUS_VALUES.join("|")})$`);

@@ -1,10 +1,12 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
+    getPropertyItemNumberForYear,
     getPropertyItemYears,
     parseStoredPropertyItems,
     PROPERTY_ITEMS_STORAGE_KEY,
     type PropertyItem,
 } from "./propertyItemStore.ts";
+import {itemExistsInPropertyYear} from "./propertyYears.ts";
 import {
     expandLegacyAnnualStatusEntries,
     getStoredAnnualStatusBarcodes,
@@ -53,9 +55,11 @@ export async function getAnnualPropertyItems(year: string, status: PropertyStatu
 
         const item = itemsByBarcode[parsedEntry.barcode]?.[parsedEntry.entityIndex];
         if (!item) return [];
+        if (!itemExistsInPropertyYear(item.sourceYears, year)) return [];
 
         return [{
             ...item,
+            itemNumber: getPropertyItemNumberForYear(item, year),
             status,
             entityIndex: parsedEntry.entityIndex,
         }];

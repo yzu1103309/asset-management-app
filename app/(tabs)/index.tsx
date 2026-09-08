@@ -1,6 +1,5 @@
-import {Alert, FlatList, Keyboard, Modal, RefreshControl, StyleSheet, Text, TouchableOpacity, View} from "react-native";
+import {Alert, FlatList, Keyboard, RefreshControl, StyleSheet, Text, TouchableOpacity, View} from "react-native";
 import SegmentedControl from "@react-native-segmented-control/segmented-control";
-import {Picker as RNPicker} from "@react-native-picker/picker";
 import {useCallback, useDeferredValue, useEffect, useMemo, useRef, useState} from "react";
 import {useSafeAreaInsets} from "react-native-safe-area-context";
 import {router, useFocusEffect, useLocalSearchParams} from "expo-router";
@@ -8,120 +7,17 @@ import {Div, Icon, Input} from "react-native-magnus";
 import ItemCard from "@/components/main/ItemCard";
 import {
     getAnnualPropertyItems,
-    getAvailablePropertyYears,
     sortAnnualPropertyListItems,
     type AnnualPropertyListItem,
 } from "@/handlers/propertyList";
 import type {PropertyStatus} from "@/handlers/propertyStatusStore";
 import {searchPropertyItems} from "@/handlers/propertySearch";
 import {useSpinner} from "@/context/SpinnerContext";
+import PropertyYearDropdown from "@/components/PropertyYearDropdown";
+import {usePropertyYear} from "@/context/PropertyYearContext";
 
 const STATUS_BY_INDEX: PropertyStatus[] = ["unknown", "checked", "pending"];
 const SEGMENT_VALUES = ["未清點", "已確認", "待處理"];
-
-function YearPicker({
-    availableYears,
-    selectedYear,
-    onSelectYear,
-}: {
-    availableYears: string[];
-    selectedYear: string | null;
-    onSelectYear: (year: string) => void;
-}) {
-    const [modalVisible, setModalVisible] = useState(false);
-    const [draftYear, setDraftYear] = useState(selectedYear ?? availableYears[0] ?? "");
-
-    useEffect(() => {
-        if (modalVisible) {
-            setDraftYear(selectedYear ?? availableYears[0] ?? "");
-        }
-    }, [availableYears, modalVisible, selectedYear]);
-
-    if (availableYears.length === 0) {
-        return (
-            <View style={[styles.yearPickerButton, styles.yearPickerButtonDisabled]}>
-                <Text style={[styles.yearPickerButtonText, styles.yearPickerButtonTextDisabled]}>
-                    尚未匯入
-                </Text>
-            </View>
-        );
-    }
-
-    const confirmSelection = () => {
-        setModalVisible(false);
-        if (draftYear) onSelectYear(draftYear);
-    };
-
-    return (
-        <>
-            <TouchableOpacity
-                activeOpacity={0.75}
-                onPress={() => setModalVisible(true)}
-                style={styles.yearPickerButton}
-            >
-                <Text style={styles.yearPickerButtonText}>
-                    {selectedYear ? `${selectedYear} 年度` : "選擇年度"}
-                </Text>
-                <Icon name="chevron-down" fontFamily="Feather" color="#2581eb" fontSize="lg" ml="xs" />
-            </TouchableOpacity>
-
-            <Modal
-                transparent
-                visible={modalVisible}
-                animationType="fade"
-                onRequestClose={() => setModalVisible(false)}
-            >
-                <TouchableOpacity
-                    activeOpacity={1}
-                    style={styles.yearPickerModalBackdrop}
-                    onPress={() => setModalVisible(false)}
-                >
-                    <View
-                        style={styles.yearPickerModalPanel}
-                        onStartShouldSetResponder={() => true}
-                    >
-                        <View style={styles.yearPickerModalHeader}>
-                            <Text style={styles.yearPickerModalTitle}>選擇年度</Text>
-                            <Text style={styles.yearPickerModalSubtitle}>選擇要查看的年度清單與盤點狀態</Text>
-                        </View>
-
-                        <View style={styles.yearPickerContainer}>
-                            <RNPicker
-                                selectedValue={draftYear}
-                                onValueChange={(value) => {
-                                    if (typeof value === "string") setDraftYear(value);
-                                }}
-                                style={styles.yearPicker}
-                                itemStyle={styles.yearPickerItem}
-                            >
-                                {availableYears.map((year) => (
-                                    <RNPicker.Item key={year} label={`${year} 年度`} value={year} />
-                                ))}
-                            </RNPicker>
-                        </View>
-
-                        <View style={styles.yearPickerModalActions}>
-                            <TouchableOpacity
-                                activeOpacity={0.78}
-                                onPress={() => setModalVisible(false)}
-                                style={[styles.yearPickerModalActionButton, styles.yearPickerModalCancelButton]}
-                            >
-                                <Text style={styles.yearPickerModalCancel}>取消</Text>
-                            </TouchableOpacity>
-                            <TouchableOpacity
-                                activeOpacity={0.78}
-                                onPress={confirmSelection}
-                                style={[styles.yearPickerModalActionButton, styles.yearPickerModalDoneButton]}
-                            >
-                                <Text style={styles.yearPickerModalDone}>完成</Text>
-                            </TouchableOpacity>
-                        </View>
-                    </View>
-                </TouchableOpacity>
-            </Modal>
-        </>
-    );
-}
 
 export default function I()
 {
@@ -129,9 +25,8 @@ export default function I()
     const select = params.select != null ? Number(params.select) : undefined;
     const insets = useSafeAreaInsets()
     const {showSpinner, hideSpinner} = useSpinner();
+    const {selectedYear, refreshYears} = usePropertyYear();
     const [selected, setSelected] = useState(0);
-    const [availableYears, setAvailableYears] = useState<string[]>([]);
-    const [selectedYear, setSelectedYear] = useState<string | null>(null);
     const [items, setItems] = useState<AnnualPropertyListItem[]>([]);
     const [loading, setLoading] = useState(false);
     const [refreshing, setRefreshing] = useState(false);
@@ -160,13 +55,8 @@ export default function I()
         }
 
         try {
-            const years = await getAvailablePropertyYears();
-            const preferredYear = requestedYear ?? selectedYear;
-            const year = preferredYear && years.includes(preferredYear) ? preferredYear : years[0] ?? null;
+            const {selectedYear: year} = await refreshYears(requestedYear ?? selectedYear);
             if (refreshRequestRef.current !== requestId) return;
-
-            setAvailableYears(years);
-            setSelectedYear(year);
 
             if (!year) {
                 setItems([]);
@@ -189,7 +79,7 @@ export default function I()
                 if (!showRefreshing) hideSpinner();
             }
         }
-    }, [hideSpinner, selected, selectedYear, showSpinner]);
+    }, [hideSpinner, refreshYears, selected, selectedYear, showSpinner]);
 
     useFocusEffect(
         useCallback(() => {
@@ -207,16 +97,13 @@ export default function I()
         router.setParams({ select: String(index) });
     };
 
-    const selectYear = (year: string) => {
-        if (year === selectedYear) return;
-
+    const handleYearSelectionAccepted = useCallback((year: string) => {
         refreshRequestRef.current += 1;
         showSpinner();
         setItems([]);
         setLoading(true);
-        setSelectedYear(year);
         void refresh(false, year, true);
-    };
+    }, [refresh, showSpinner]);
 
     const handleClear = () => {
         setInput("");
@@ -247,10 +134,10 @@ export default function I()
         <View style={[styles.container, {paddingTop: insets.top + 15  }]}>
             <View style={styles.headerRow}>
                 <Text style={styles.text}>財產清單</Text>
-                <YearPicker
-                    availableYears={availableYears}
-                    selectedYear={selectedYear}
-                    onSelectYear={selectYear}
+                <PropertyYearDropdown
+                    containerStyle={styles.yearPickerEdge}
+                    onSelectionAccepted={handleYearSelectionAccepted}
+                    hideWhenDisabled
                 />
             </View>
             <SegmentedControl
@@ -327,102 +214,8 @@ const styles = StyleSheet.create({
         alignItems: "center",
         justifyContent: "space-between",
     },
-    yearPickerButton: {
-        minHeight: 38,
-        flexDirection: "row",
-        alignItems: "center",
-        justifyContent: "center",
-        paddingHorizontal: 2,
-    },
-    yearPickerButtonDisabled: {
-        opacity: 0.55,
-    },
-    yearPickerButtonText: {
-        color: "#2581eb",
-        fontSize: 16,
-        fontWeight: "800",
-    },
-    yearPickerButtonTextDisabled: {
-        color: "#98A2B3",
-    },
-    yearPickerModalBackdrop: {
-        flex: 1,
-        alignItems: "center",
-        justifyContent: "center",
-        paddingHorizontal: 22,
-        backgroundColor: "rgba(15, 23, 42, 0.35)",
-    },
-    yearPickerModalPanel: {
-        width: "100%",
-        maxWidth: 420,
-        paddingTop: 20,
-        paddingHorizontal: 18,
-        paddingBottom: 18,
-        borderRadius: 18,
-        backgroundColor: "white",
-    },
-    yearPickerModalHeader: {
-        alignItems: "center",
-        paddingBottom: 12,
-        borderBottomWidth: StyleSheet.hairlineWidth,
-        borderBottomColor: "#EAECF0",
-    },
-    yearPickerModalTitle: {
-        color: "#101828",
-        fontSize: 20,
-        fontWeight: "800",
-    },
-    yearPickerModalSubtitle: {
-        marginTop: 6,
-        color: "#667085",
-        fontSize: 14,
-        textAlign: "center",
-    },
-    yearPickerModalActions: {
-        flexDirection: "row",
-        alignItems: "center",
-        gap: 10,
-        paddingTop: 10,
-    },
-    yearPickerModalActionButton: {
-        flex: 1,
-        minHeight: 44,
-        alignItems: "center",
-        justifyContent: "center",
-        borderRadius: 12,
-    },
-    yearPickerModalCancelButton: {
-        backgroundColor: "#F2F4F7",
-    },
-    yearPickerModalDoneButton: {
-        backgroundColor: "#2563EB",
-    },
-    yearPickerModalCancel: {
-        color: "#344054",
-        fontSize: 16,
-        fontWeight: "800",
-    },
-    yearPickerModalDone: {
-        color: "white",
-        fontSize: 16,
-        fontWeight: "800",
-    },
-    yearPickerContainer: {
-        height: 150,
-        alignItems: "center",
-        justifyContent: "center",
-        overflow: "hidden",
-    },
-    yearPicker: {
-        width: "100%",
-        height: 150,
-        color: "#00b7ff",
-    },
-    yearPickerItem: {
-        color: "#2563EB",
-        fontSize: 16,
-        fontWeight: "800",
-        height: 150,
+    yearPickerEdge: {
+        marginRight: 0,
     },
     listContent: {
         paddingTop: 5,

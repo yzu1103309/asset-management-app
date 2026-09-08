@@ -1,6 +1,8 @@
 import type {ParsedPropertyItem} from "./propertyHtmlParser.ts";
+import {isSamePropertyYear} from "./propertyYears.ts";
 
 export const PROPERTY_ITEMS_STORAGE_KEY = "@ncu-property-checking/property-items:v1";
+const PROPERTY_ENTITY_KEY_SEPARATOR = "::entity:";
 
 export type PropertyLocation = {
     areaId: string | null;
@@ -23,9 +25,12 @@ export type PropertyItem = ParsedPropertyItem & {
     createdAt: string;
     updatedAt: string;
     sourceYears: string[];
+    itemNumbersByYear?: Record<string, string>;
     location: PropertyLocation;
     note: string | null;
     photos?: PropertyPhoto[];
+    parentEntityKey?: string | null;
+    childEntityKeys?: string[];
 };
 
 export type PropertyItemsByBarcode = Record<string, PropertyItem[]>;
@@ -62,6 +67,33 @@ export function parseStoredPropertyItems(value: string | null): PropertyItemsByB
     }
 }
 
+export function getPropertyEntityKey(barcode: string, entityIndex: number): string {
+    return `${barcode}${PROPERTY_ENTITY_KEY_SEPARATOR}${entityIndex}`;
+}
+
+export function parsePropertyEntityKey(entityKey: string): {barcode: string; entityIndex: number} | null {
+    const separatorIndex = entityKey.lastIndexOf(PROPERTY_ENTITY_KEY_SEPARATOR);
+    if (separatorIndex < 0) return null;
+
+    const barcode = entityKey.slice(0, separatorIndex);
+    const entityIndex = Number(entityKey.slice(separatorIndex + PROPERTY_ENTITY_KEY_SEPARATOR.length));
+    if (!barcode || !Number.isInteger(entityIndex) || entityIndex < 0) return null;
+
+    return {barcode, entityIndex};
+}
+
+export function getPropertyItemByEntityKey(
+    itemsByBarcode: PropertyItemsByBarcode,
+    entityKey: string | null | undefined,
+): PropertyItem | null {
+    if (!entityKey) return null;
+
+    const parsedKey = parsePropertyEntityKey(entityKey);
+    if (!parsedKey) return null;
+
+    return itemsByBarcode[parsedKey.barcode]?.[parsedKey.entityIndex] ?? null;
+}
+
 export function getPropertyItemYears(itemsByBarcode: PropertyItemsByBarcode): string[] {
     const years = new Set<string>();
 
@@ -82,12 +114,70 @@ function getUpdatedSourceYears(previousItem: PropertyItem | undefined, sourceYea
         : previousSourceYears;
 }
 
-function findPreviousItemIndex(bucket: PropertyItem[], importedItem: ParsedPropertyItem, occurrenceIndex: number, usedIndexes: Set<number>): number {
+export function getPropertyItemNumberForYear(item: Pick<PropertyItem, "itemNumber" | "itemNumbersByYear">, year: string | null | undefined): string {
+    if (!year) return item.itemNumber;
+    const exactItemNumber = item.itemNumbersByYear?.[year];
+    if (exactItemNumber) return exactItemNumber;
+
+    const equivalentYearEntry = Object.entries(item.itemNumbersByYear ?? {})
+        .find(([storedYear]) => isSamePropertyYear(storedYear, year));
+
+    return equivalentYearEntry?.[1] ?? item.itemNumber;
+}
+
+function getUpdatedItemNumbersByYear(
+    previousItem: PropertyItem | undefined,
+    importedItem: ParsedPropertyItem,
+    sourceYear: string | undefined,
+): Record<string, string> | undefined {
+    if (!sourceYear) return previousItem?.itemNumbersByYear;
+
+    return {
+        ...(previousItem?.itemNumbersByYear ?? {}),
+        [sourceYear]: importedItem.itemNumber,
+    };
+}
+
+function itemExistsInExactSourceYear(item: PropertyItem, sourceYear: string | undefined): boolean {
+    return !!sourceYear && item.sourceYears.includes(sourceYear);
+}
+
+function normalizePropertyName(value: string): string {
+    return value.replace(/\s+/g, "");
+}
+
+function isLikelySamePropertyName(a: string, b: string): boolean {
+    const normalizedA = normalizePropertyName(a);
+    const normalizedB = normalizePropertyName(b);
+
+    return normalizedA === normalizedB || normalizedA.includes(normalizedB) || normalizedB.includes(normalizedA);
+}
+
+function findPreviousItemIndex(
+    bucket: PropertyItem[],
+    importedItem: ParsedPropertyItem,
+    occurrenceIndex: number,
+    usedIndexes: Set<number>,
+    sourceYear?: string,
+): number {
+    if (sourceYear) {
+        const bySameYearItemNumber = bucket.findIndex((item, index) => (
+            !usedIndexes.has(index)
+            && itemExistsInExactSourceYear(item, sourceYear)
+            && getPropertyItemNumberForYear(item, sourceYear) === importedItem.itemNumber
+        ));
+        if (bySameYearItemNumber >= 0) return bySameYearItemNumber;
+    }
+
+    const byPropertyName = bucket.findIndex((item, index) => (
+        !usedIndexes.has(index) && isLikelySamePropertyName(item.propertyName, importedItem.propertyName)
+    ));
+    if (byPropertyName >= 0) return byPropertyName;
+
+    if (sourceYear) return -1;
+
     const byItemNumber = bucket.findIndex((item, index) => !usedIndexes.has(index) && item.itemNumber === importedItem.itemNumber);
     if (byItemNumber >= 0) return byItemNumber;
-
-    const byPropertyName = bucket.findIndex((item, index) => !usedIndexes.has(index) && item.propertyName === importedItem.propertyName);
-    if (byPropertyName >= 0) return byPropertyName;
 
     return !usedIndexes.has(occurrenceIndex) && bucket[occurrenceIndex] ? occurrenceIndex : -1;
 }
@@ -108,7 +198,7 @@ export function mergePropertyItems(
         const previousBucket = storedItems[importedItem.barcode] ?? [];
         const nextBucket = nextBuckets.get(importedItem.barcode) ?? [];
         const usedIndexes = usedPreviousIndexes.get(importedItem.barcode) ?? new Set<number>();
-        const previousIndex = findPreviousItemIndex(previousBucket, importedItem, nextBucket.length, usedIndexes);
+        const previousIndex = findPreviousItemIndex(previousBucket, importedItem, nextBucket.length, usedIndexes, sourceYear);
         const previousItem = previousIndex >= 0 ? previousBucket[previousIndex] : undefined;
 
         if (previousItem) {
@@ -121,9 +211,11 @@ export function mergePropertyItems(
         nextBucket.push({
             ...previousItem,
             ...importedItem,
+            itemNumber: previousItem?.itemNumber ?? importedItem.itemNumber,
             createdAt: previousItem?.createdAt ?? importedAt,
             updatedAt: importedAt,
             sourceYears: getUpdatedSourceYears(previousItem, sourceYear),
+            itemNumbersByYear: getUpdatedItemNumbersByYear(previousItem, importedItem, sourceYear),
             location: previousItem?.location ?? {
                 areaId: null,
                 areaName: null,
