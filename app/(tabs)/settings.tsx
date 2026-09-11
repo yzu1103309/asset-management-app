@@ -1,54 +1,68 @@
 import React, {useCallback, useEffect, useRef, useState} from "react";
-import {Alert, Animated, Easing, Image, LayoutAnimation, Linking, Modal, Platform, ScrollView, StyleSheet, TouchableOpacity, UIManager, View} from "react-native";
+import {
+    Alert,
+    Animated,
+    Easing,
+    Image,
+    LayoutAnimation,
+    Linking,
+    Modal,
+    Platform,
+    ScrollView,
+    StyleSheet,
+    TouchableOpacity,
+    UIManager,
+    View
+} from "react-native";
 import {type Href, router} from "expo-router";
 import {Button, Icon, Text} from "react-native-magnus";
 import {useSafeAreaInsets} from "react-native-safe-area-context";
-import {MaterialIcons} from "@expo/vector-icons";
 import * as WebBrowser from "expo-web-browser";
+import {WebBrowserPresentationStyle} from "expo-web-browser";
 import {inDevHandler} from "@/components/inDev";
 import {usePrompt} from "@/hooks/usePrompt";
 import {useSafeAreaActionSheet} from "@/hooks/useSafeAreaActionSheet";
 import {clearAllLocalData} from "@/handlers/clearDatabase";
 import {useSpinner} from "@/context/SpinnerContext";
-import {MenuRow, Section, SettingRow} from "@/components/settings/SettingsRows";
+import {MenuRow, Section} from "@/components/settings/SettingsRows";
 import {
     compareVersionStrings,
     formatVersionTag,
     getDisplayVersionEntries,
     LOCAL_VERSION_RECORD,
     parseVersionRecordJson,
-    type VersionRecordEntry,
     VERSION_RECORD_URL,
+    type VersionRecordEntry,
 } from "@/constants/versionRecord";
 import {File, type PickSingleFileOptions} from "expo-file-system";
 import {getStoredPropertyItems, importPropertyFileBytes} from "@/handlers/propertyImport";
 import {getPropertySpreadsheetSheetNames} from "@/handlers/propertySpreadsheetParser";
-import {getStoredAreaLayout, parseDrawioAreaLayout, saveAreaLayout, type AreaLayout} from "@/handlers/areaLayout";
-import {findMissingAreaLayoutBindings, type BoundAreaReference} from "@/handlers/areaLayoutCompatibility";
+import {type AreaLayout, getStoredAreaLayout, parseDrawioAreaLayout, saveAreaLayout} from "@/handlers/areaLayout";
+import {type BoundAreaReference, findMissingAreaLayoutBindings} from "@/handlers/areaLayoutCompatibility";
 import AreaLayoutPreviewModal from "@/components/settings/AreaLayoutPreviewModal";
 import {clearPropertyLabelQueue, getPropertyLabelQueue} from "@/handlers/propertyLabelQueue";
 import {getPropertyLabelPrintItems, type PropertyLabelPrintItem} from "@/handlers/propertyLabelPrintHtml";
 import {
     cleanupPropertyLabelPdf,
     createPropertyLabelPdf,
-    sharePropertyLabelPdf,
     type PropertyLabelPdfExportResult,
     type PropertyLabelPdfProgress,
+    sharePropertyLabelPdf,
 } from "@/handlers/propertyLabelPdf";
 import {
     cleanupPropertyExcelFile,
     createPropertyExcelFile,
-    sharePropertyExcelFile,
     type PropertyExcelExportResult,
+    sharePropertyExcelFile,
 } from "@/handlers/propertyExcelExport";
 import {
+    type BackupExportResult,
+    type BackupProgress,
     cleanupBackupFile,
     createFullBackupFile,
     getExistingBackupTargetSummary,
     restoreFullBackupFile,
     shareBackupFile,
-    type BackupExportResult,
-    type BackupProgress,
 } from "@/handlers/propertyBackup";
 
 type ProgressUpdate = BackupProgress | PropertyLabelPdfProgress;
@@ -460,7 +474,7 @@ export default function Settings()
 
     const openBrowserUrl = useCallback(async (url: string, label: string) => {
         try {
-            await WebBrowser.openBrowserAsync(url);
+            await WebBrowser.openBrowserAsync(url, {presentationStyle: WebBrowserPresentationStyle.FULL_SCREEN});
         } catch (error) {
             console.error(`開啟${label}失敗:`, error);
             Alert.alert("無法開啟連結", "請稍後再試。");
@@ -1099,6 +1113,17 @@ export default function Settings()
                         iconFamily="Feather"
                         color="#B42318"
                         onPress={() => { void handleClearPropertyLabelQueue(); }}
+                    />
+                </Section>
+
+                <Section title="軟體設定">
+                    <MenuRow
+                        title="掃描器設定"
+                        description="選擇掃描器與可辨識的條碼格式"
+                        icon="camera"
+                        iconFamily="Ionicons"
+                        color="blue500"
+                        onPress={() => router.push("/stacks/camera_settings" as Href)}
                     />
                 </Section>
 

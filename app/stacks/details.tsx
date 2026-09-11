@@ -6,6 +6,7 @@ import {
     Easing,
     FlatList,
     KeyboardAvoidingView,
+    type LayoutChangeEvent,
     Modal,
     Platform,
     Pressable,
@@ -924,10 +925,23 @@ function PhotoSourceMenu({
         onSelect(source);
     }, [onSelect]);
 
-    return (
-        <MenuView title="新增照片" actions={actions} onPressAction={handlePressAction} style={triggerStyle}>
+    const menu = (
+        <MenuView
+            title="新增照片"
+            actions={actions}
+            onPressAction={handlePressAction}
+            style={triggerStyle ? styles.addPhotoMenuInnerTrigger : undefined}
+        >
             {children}
         </MenuView>
+    );
+
+    if (!triggerStyle) return menu;
+
+    return (
+        <View style={triggerStyle}>
+            {menu}
+        </View>
     );
 }
 
@@ -1379,10 +1393,19 @@ function PropertyDetailBlock({
 }) {
     const {width: windowWidth} = useWindowDimensions();
     const statusColors = PROPERTY_STATUS_COLORS[status];
+    const [photoSectionWidth, setPhotoSectionWidth] = useState(0);
     const savedAreaId = areaLayout
         ? findAreaByIdOrName(areaLayout.areas, item.location.areaId, item.location.areaName)?.id ?? null
         : item.location.areaId;
     const photoCount = item.photos?.length ?? 0;
+    const addPhotoButtonWidth = photoSectionWidth || Math.max(windowWidth - 42, 0);
+    const handlePhotoSectionLayout = useCallback((event: LayoutChangeEvent) => {
+        const nextWidth = event.nativeEvent.layout.width;
+
+        setPhotoSectionWidth((currentWidth) => (
+            Math.abs(currentWidth - nextWidth) < 1 ? currentWidth : nextWidth
+        ));
+    }, []);
     const singlePhotoThumbSize = useMemo(() => {
         const side = Math.min(Math.max(windowWidth * 0.46, 160), 190);
 
@@ -1450,7 +1473,7 @@ function PropertyDetailBlock({
                     value={item.note}
                     onPress={() => onEditText(item, actualEntityIndex, "note")}
                 />
-                <View style={styles.photoSection}>
+                <View style={styles.photoSection} onLayout={handlePhotoSectionLayout}>
                     <View style={styles.photoSectionHeader}>
                         <Text fontSize="md" color="gray600" style={[styles.detailLabel, styles.photoSectionTitle]} numberOfLines={1}>財產照片</Text>
                         <Text
@@ -1498,7 +1521,7 @@ function PropertyDetailBlock({
                         <PhotoSourceMenu
                             addingPhoto={addingPhoto}
                             onSelect={(source) => onAddPhoto(item, actualEntityIndex, source)}
-                            triggerStyle={styles.addPhotoMenuTrigger}
+                            triggerStyle={[styles.addPhotoMenuTrigger, {width: addPhotoButtonWidth}]}
                         >
                             <View style={[styles.addPhotoButton, addingPhoto && styles.addPhotoButtonDisabled]}>
                                 <Icon name="library-add" fontFamily="MaterialIcons" color="#2563EB" fontSize="sm" mr="sm" style={styles.addPhotoButtonIcon} />
@@ -3225,6 +3248,7 @@ const styles = StyleSheet.create({
         minHeight: 48,
         marginTop: 4,
         marginBottom: 4,
+        paddingHorizontal: 14,
         borderRadius: 14,
         flexDirection: "row",
         alignItems: "center",
@@ -3236,6 +3260,11 @@ const styles = StyleSheet.create({
         flexShrink: 0,
     },
     addPhotoMenuTrigger: {
+        width: "100%",
+        alignSelf: "stretch",
+        flexShrink: 0,
+    },
+    addPhotoMenuInnerTrigger: {
         width: "100%",
         alignSelf: "stretch",
         flexShrink: 0,

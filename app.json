@@ -2,14 +2,18 @@
   "expo": {
     "name": "Astalog",
     "slug": "asset-management-app",
-    "version": "0.1.1.0",
+    "version": "0.1.1.1",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "astalog",
     "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.yzu1103309.Astalog"
+      "deploymentTarget": "15.5",
+      "bundleIdentifier": "com.yzu1103309.Astalog",
+      "infoPlist": {
+        "NSCameraUsageDescription": "允許開啟相機，用於掃描財產條碼與拍攝財產照片。"
+      }
     },
     "android": {
       "softwareKeyboardLayoutMode": "resize",
@@ -19,6 +23,7 @@
       },
       "predictiveBackGestureEnabled": false,
       "permissions": [
+        "android.permission.CAMERA",
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE",
         "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",

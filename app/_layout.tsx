@@ -97,6 +97,7 @@ export default function RootLayout() {
           <Stack>
             <Stack.Screen name="(tabs)" options={{headerShown: false, title: "主頁"}}/>
             <Stack.Screen name="stacks/details" options={{title: "財產詳細資訊", headerShown: false}}/>
+            <Stack.Screen name="stacks/camera_settings" options={{title: "相機設定"}}/>
           </Stack>
         </>
       </Providers>

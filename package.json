@@ -1,7 +1,7 @@
 {
   "name": "asset-management-app",
   "main": "expo-router/entry",
-  "version": "0.1.1.0",
+  "version": "0.1.1.1",
   "scripts": {
     "start": "expo start --go",
     "reset-project": "node ./scripts/reset-project.js",
@@ -17,7 +17,6 @@
     "@expo/vector-icons": "^15.0.3",
     "@react-native-async-storage/async-storage": "2.2.0",
     "@react-native-picker/picker": "2.11.4",
-    "@react-native-segmented-control/segmented-control": "^2.5.7",
     "@react-navigation/bottom-tabs": "^7.4.0",
     "@react-navigation/elements": "^2.6.3",
     "@react-navigation/native": "^7.1.8",
@@ -52,9 +51,13 @@
     "react-native-gesture-handler": "~2.32.0",
     "react-native-magnus": "^1.0.63",
     "react-native-modal": "^14.0.0-rc.1",
+    "react-native-nitro-image": "^0.15.2",
+    "react-native-nitro-modules": "^0.37.1",
     "react-native-reanimated": "4.5.1",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "~4.26.0",
+    "react-native-vision-camera": "^5.2.3",
+    "react-native-vision-camera-barcode-scanner": "^5.2.3",
     "react-native-web": "~0.21.0",
     "react-native-worklets": "0.10.1"
   },

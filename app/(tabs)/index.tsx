@@ -1,5 +1,5 @@
 import {Alert, FlatList, Keyboard, RefreshControl, StyleSheet, Text, TouchableOpacity, View} from "react-native";
-import SegmentedControl from "@react-native-segmented-control/segmented-control";
+import ExpoSegmentedControl from "@expo/ui/community/segmented-control";
 import {useCallback, useDeferredValue, useEffect, useMemo, useRef, useState} from "react";
 import {useSafeAreaInsets} from "react-native-safe-area-context";
 import {router, useFocusEffect, useLocalSearchParams} from "expo-router";
@@ -140,13 +140,12 @@ export default function I()
                     hideWhenDisabled
                 />
             </View>
-            <SegmentedControl
+            <ExpoSegmentedControl
                 values={SEGMENT_VALUES}
                 selectedIndex={selected}
                 onChange={handleChange}
                 appearance="light"
-            >
-            </SegmentedControl>
+            />
             {items.length > 0 && (
                 <Div row alignItems="center" mt="lg" mb="md">
                     <Input

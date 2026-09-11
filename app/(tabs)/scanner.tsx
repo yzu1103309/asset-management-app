@@ -5,14 +5,12 @@ import {
     Linking,
     TouchableOpacity,
     ActivityIndicator,
-    PanResponder,
     AppState,
     type AppStateStatus,
-    type GestureResponderEvent,
 } from "react-native";
-import { CameraView, useCameraPermissions } from 'expo-camera';
-import {router, useFocusEffect} from "expo-router";
-import {memo, useCallback, useEffect, useMemo, useRef, useState} from "react";
+import {CameraView, useCameraPermissions, type BarcodeType} from "expo-camera";
+import {router, type Href, useFocusEffect} from "expo-router";
+import {memo, useCallback, useEffect, useMemo, useRef, useState, type ComponentType} from "react";
 import {Text, Button, Icon, Div} from "react-native-magnus";
 import {useSafeAreaInsets} from "react-native-safe-area-context";
 import SearchModal from "@/components/SearchModal";
@@ -24,29 +22,32 @@ import {
     itemExistsInPropertyYear,
     propertyYearToWesternNumber,
 } from "@/handlers/propertyYears";
+import {
+    getDefaultScannerSettings,
+    getExpoCameraBarcodeTypes,
+    getStoredScannerSettings,
+    getVisionCameraBarcodeFormats,
+    resolveScannerProvider,
+    type ScannerProvider,
+    type ScannerSettings,
+    type VisionCameraBarcodeFormat,
+} from "@/handlers/scannerSettings";
 
 const CAMERA_IDLE_TIMEOUT_MS = 60 * 1000;
 const CAMERA_READY_RETRY_MS = 1500;
 const CAMERA_READY_MAX_RETRIES = 2;
-const SCANNER_CAMERA_DEBUG_CONTROLS = false;
-const AUTO_CAMERA_LENS = "__auto__";
-const DEFAULT_SCANNER_CAMERA_ZOOM = 0.16;
+type ScannerZoomPresetId = "wide" | "standard" | "closer" | "maximum";
 const SCANNER_CAMERA_ZOOM_PRESETS = [
-    {label: "較廣", value: 0.08},
-    {label: "標準", value: DEFAULT_SCANNER_CAMERA_ZOOM},
-    {label: "放大", value: 0.24},
-    {label: "最大", value: 0.32},
-];
-const SCANNER_CAMERA_DEBUG_MIN_ZOOM = 0;
-const SCANNER_CAMERA_DEBUG_MAX_ZOOM = 0.3;
-const SCANNER_CAMERA_DEBUG_ZOOM_STEP = 0.01;
-const SCANNER_CAMERA_DEBUG_ZOOM_OPTIONS = [
-    {label: "0", value: 0},
-    {label: "0.05", value: 0.05},
-    {label: "0.1", value: 0.1},
-    {label: "0.2", value: 0.2},
-    {label: "0.3", value: 0.3},
-];
+    {id: "wide", label: "較廣", expoZoom: 0.08, visionZoom: 1},
+    {id: "standard", label: "標準", expoZoom: 0.16, visionZoom: 1.25},
+    {id: "closer", label: "放大", expoZoom: 0.24, visionZoom: 1.75},
+    {id: "maximum", label: "最大", expoZoom: 0.32, visionZoom: 2.5},
+] as const satisfies readonly {
+    id: ScannerZoomPresetId;
+    label: string;
+    expoZoom: number;
+    visionZoom: number;
+}[];
 const absoluteFill = {
     position: "absolute" as const,
     top: 0,
@@ -75,14 +76,27 @@ function getItemSourceYears(items: Awaited<ReturnType<typeof getPropertyItemsByB
     return [...new Set(items.flatMap((item) => item.sourceYears))].sort(comparePropertyYearsDescending);
 }
 
-const clampCameraZoom = (zoom: number) => {
-    const clamped = Math.min(SCANNER_CAMERA_DEBUG_MAX_ZOOM, Math.max(SCANNER_CAMERA_DEBUG_MIN_ZOOM, zoom));
-    return Math.round(clamped / SCANNER_CAMERA_DEBUG_ZOOM_STEP) * SCANNER_CAMERA_DEBUG_ZOOM_STEP;
-};
+function ScannerTitle() {
+    return (
+        <View style={styles.scannerTitleRow}>
+            <Text numberOfLines={1} style={styles.scannerTitle}>請掃描財產標籤上的條碼</Text>
+            <TouchableOpacity
+                accessibilityRole="button"
+                accessibilityLabel="開啟相機設定"
+                activeOpacity={0.72}
+                hitSlop={{top: 8, right: 8, bottom: 8, left: 8}}
+                style={styles.cameraSettingsButton}
+                onPress={() => router.push("/stacks/camera_settings" as Href)}
+            >
+                <Icon name="settings" fontFamily="Feather" fontSize={17} color="#4B5563" />
+            </TouchableOpacity>
+        </View>
+    );
+}
 
 type ScannerCameraProps = {
+    barcodeTypes: BarcodeType[];
     sessionKey: number;
-    customAutoFocus: boolean;
     selectedLens?: string;
     zoom: number;
     enableTorch: boolean;
@@ -92,8 +106,8 @@ type ScannerCameraProps = {
 };
 
 const ScannerCamera = memo(function ScannerCamera({
+    barcodeTypes,
     sessionKey,
-    customAutoFocus,
     selectedLens,
     zoom,
     enableTorch,
@@ -108,34 +122,71 @@ const ScannerCamera = memo(function ScannerCamera({
             style={styles.camera}
             facing="back"
             barcodeScannerSettings={{
-                barcodeTypes: ["code39", "qr"],
+                barcodeTypes,
             }}
             onAvailableLensesChanged={({lenses}) => onAvailableLensesChanged(lenses)}
             onBarcodeScanned={(scanningResult) => onBarcodeScanned(scanningResult.data)}
             selectedLens={selectedLens}
             zoom={zoom}
             enableTorch={enableTorch}
-            autofocus={customAutoFocus ? "on" : "off"}
+            autofocus="on"
             onCameraReady={onReady}
         />
     );
 });
 
+type VisionCameraScannerProps = {
+    active: boolean;
+    barcodeFormats: VisionCameraBarcodeFormat[];
+    enableTorch: boolean;
+    zoom: number;
+    onBarcodeScanned: (value: string) => void;
+    onError: (error: Error) => void;
+    onReady: () => void;
+};
+
+let visionCameraModulePromise: Promise<{default: ComponentType<VisionCameraScannerProps>}> | null = null;
+
+function loadVisionCameraScanner() {
+    visionCameraModulePromise ??= import("@/components/scanner/VisionCameraScanner");
+    return visionCameraModulePromise;
+}
+
+function VisionCameraScannerSlot(props: VisionCameraScannerProps) {
+    const [ScannerComponent, setScannerComponent] = useState<ComponentType<VisionCameraScannerProps> | null>(null);
+    const {onError} = props;
+
+    useEffect(() => {
+        let active = true;
+        void loadVisionCameraScanner()
+            .then(({default: component}) => {
+                if (active) setScannerComponent(() => component);
+            })
+            .catch((error: unknown) => {
+                if (active) onError(error instanceof Error ? error : new Error(String(error)));
+            });
+
+        return () => {
+            active = false;
+        };
+    }, [onError]);
+
+    return ScannerComponent ? <ScannerComponent {...props} /> : null;
+}
+
 export default function Scanner() {
     const [permission, requestPermission] = useCameraPermissions();
+    const [scannerSettings, setScannerSettings] = useState<ScannerSettings>(getDefaultScannerSettings);
+    const [scannerSettingsLoading, setScannerSettingsLoading] = useState(true);
+    const [runtimeProviderOverride, setRuntimeProviderOverride] = useState<ScannerProvider | null>(null);
     const [isScannerFocused, setIsScannerFocused] = useState(false);
     const [isAppActive, setIsAppActive] = useState(AppState.currentState === "active");
     const [isCameraActive, setIsCameraActive] = useState(true);
     const [isCameraLoading, setIsCameraLoading] = useState(true);
     const [cameraSessionKey, setCameraSessionKey] = useState(0);
-    const [customAutoFocus, setCustomAutoFocus] = useState(false);
-    const [availableLenses, setAvailableLenses] = useState<string[]>([]);
     const [autoSelectedLens, setAutoSelectedLens] = useState<string | undefined>(undefined);
-    const [debugSelectedLens, setDebugSelectedLens] = useState(AUTO_CAMERA_LENS);
-    const [scannerZoom, setScannerZoom] = useState(DEFAULT_SCANNER_CAMERA_ZOOM);
+    const [scannerZoomPreset, setScannerZoomPreset] = useState<ScannerZoomPresetId>("standard");
     const [torchEnabled, setTorchEnabled] = useState(false);
-    const [debugZoom, setDebugZoom] = useState(DEFAULT_SCANNER_CAMERA_ZOOM);
-    const [debugZoomTrackWidth, setDebugZoomTrackWidth] = useState(0);
     const [modalVisible, setModalVisible] = useState(false);
     const {availableYears, selectedYear, loading: yearsLoading, refreshYears} = usePropertyYear();
     const [scanned, setScanned] = useState("")
@@ -148,12 +199,24 @@ export default function Scanner() {
     const appStateRef = useRef<AppStateStatus>(AppState.currentState);
     const scannerFocusedRef = useRef(false);
     const permissionMissingLogKeyRef = useRef<string | null>(null);
-    const selectedLensRef = useRef<string | undefined>(undefined);
     const barcodeScanHandlingRef = useRef(false);
     const cameraReadyRetryCountRef = useRef(0);
-    const debugZoomDragStartRef = useRef(DEFAULT_SCANNER_CAMERA_ZOOM);
+    const visionFallbackShownRef = useRef(false);
     const insets = useSafeAreaInsets()
     const hasImportedPropertyYears = availableYears.length > 0;
+    const configuredProvider = resolveScannerProvider(scannerSettings.provider);
+    const activeProvider = runtimeProviderOverride ?? configuredProvider;
+    const usesExpoCamera = activeProvider === "expo-camera";
+    const activeZoomPreset = SCANNER_CAMERA_ZOOM_PRESETS.find(({id}) => id === scannerZoomPreset)
+        ?? SCANNER_CAMERA_ZOOM_PRESETS[1];
+    const expoCameraBarcodeTypes = useMemo(
+        () => getExpoCameraBarcodeTypes(scannerSettings.enabledFormats),
+        [scannerSettings.enabledFormats],
+    );
+    const visionCameraBarcodeFormats = useMemo(
+        () => getVisionCameraBarcodeFormats(scannerSettings.enabledFormats),
+        [scannerSettings.enabledFormats],
+    );
 
     // console.log("Scanner Page Rerender")
 
@@ -326,38 +389,34 @@ export default function Scanner() {
         }
     }
 
-    /* Autofocus seems already fixed in Expo SDK 54?
-        useEffect(() => {
-            const interval = setInterval(() => {
-                if(permission?.granted && isCameraActive){
-                    if (customAutoFocus) {
-                        setCustomAutoFocus(false)
-                    } else {
-                        setCustomAutoFocus(true)
-                    }
-                }
-            }, 800);
-            return () => clearInterval(interval);
-        });
-    */
-
     useFocusEffect(
         useCallback(() => {
+            let focusActive = true;
             const shouldReopenSearch = reopenSearchOnFocusRef.current;
 
             console.log("Reopen search on focus:", shouldReopenSearch)
             scannerFocusedRef.current = true;
+            visionFallbackShownRef.current = false;
             setIsScannerFocused(true);
             void refreshAvailableYears();
+            setScannerSettingsLoading(true);
+            setRuntimeProviderOverride(null);
+            void getStoredScannerSettings()
+                .then((storedSettings) => {
+                    if (focusActive) setScannerSettings(storedSettings);
+                })
+                .catch((error) => console.error("讀取掃描設定失敗:", error))
+                .finally(() => {
+                    if (focusActive) setScannerSettingsLoading(false);
+                });
             setModalVisible(shouldReopenSearch)
             if (shouldReopenSearch) {
                 pauseCamera("scanner_focus_reopen_search");
-            } else {
-                queueCameraActivation("scanner_focus");
             }
             setScanned("")
 
             return () => {
+                focusActive = false;
                 searchOpenRequestIdRef.current += 1;
                 cancelPendingCameraPause();
                 cancelPendingCameraResume();
@@ -369,7 +428,7 @@ export default function Scanner() {
                 setIsCameraActive(false);
                 setIsCameraLoading(false);
             };
-        }, [pauseCamera, queueCameraActivation, refreshAvailableYears])
+        }, [pauseCamera, refreshAvailableYears])
     );
 
     useEffect(() => {
@@ -410,45 +469,29 @@ export default function Scanner() {
         };
     }, []);
 
-    const shouldMountCamera = !!permission?.granted && hasImportedPropertyYears && !yearsLoading && isAppActive && isScannerFocused && !modalVisible && isCameraActive;
-    const effectiveSelectedLens = SCANNER_CAMERA_DEBUG_CONTROLS && debugSelectedLens !== AUTO_CAMERA_LENS
-        ? debugSelectedLens
-        : autoSelectedLens;
-    const effectiveCameraZoom = SCANNER_CAMERA_DEBUG_CONTROLS ? debugZoom : scannerZoom;
-    const debugZoomRatio = (debugZoom - SCANNER_CAMERA_DEBUG_MIN_ZOOM) / (SCANNER_CAMERA_DEBUG_MAX_ZOOM - SCANNER_CAMERA_DEBUG_MIN_ZOOM);
-
-    const updateDebugZoomFromLocation = useCallback((event: GestureResponderEvent) => {
-        if (!debugZoomTrackWidth) return;
-
-        const ratio = Math.min(1, Math.max(0, event.nativeEvent.locationX / debugZoomTrackWidth));
-        const nextZoom = SCANNER_CAMERA_DEBUG_MIN_ZOOM + ratio * (SCANNER_CAMERA_DEBUG_MAX_ZOOM - SCANNER_CAMERA_DEBUG_MIN_ZOOM);
-        setDebugZoom(clampCameraZoom(nextZoom));
-    }, [debugZoomTrackWidth]);
-
-    const debugZoomPanResponder = useMemo(() => PanResponder.create({
-        onStartShouldSetPanResponder: () => SCANNER_CAMERA_DEBUG_CONTROLS,
-        onMoveShouldSetPanResponder: () => SCANNER_CAMERA_DEBUG_CONTROLS,
-        onPanResponderGrant: (event) => {
-            debugZoomDragStartRef.current = debugZoom;
-            updateDebugZoomFromLocation(event);
-        },
-        onPanResponderMove: (_, gestureState) => {
-            if (!debugZoomTrackWidth) return;
-
-            const zoomRange = SCANNER_CAMERA_DEBUG_MAX_ZOOM - SCANNER_CAMERA_DEBUG_MIN_ZOOM;
-            const nextZoom = debugZoomDragStartRef.current + (gestureState.dx / debugZoomTrackWidth) * zoomRange;
-            setDebugZoom(clampCameraZoom(nextZoom));
-        },
-    }), [debugZoom, debugZoomTrackWidth, updateDebugZoomFromLocation]);
+    const shouldMountCamera = !scannerSettingsLoading && !!permission?.granted && hasImportedPropertyYears && !yearsLoading && isAppActive && isScannerFocused && !modalVisible && isCameraActive;
 
     useEffect(() => {
-        if (shouldMountCamera) {
-            setIsCameraLoading(true);
-        } else {
-            cameraReadyRetryCountRef.current = 0;
-            setIsCameraLoading(false);
-            setTorchEnabled(false);
-        }
+        if (scannerSettingsLoading || !isScannerFocused || modalVisible || !hasImportedPropertyYears) return;
+
+        const task = runWhenIdle(() => {
+            queueCameraActivation("scanner_provider_ready");
+        });
+        return task.cancel;
+    }, [hasImportedPropertyYears, isScannerFocused, modalVisible, queueCameraActivation, scannerSettingsLoading]);
+
+    useEffect(() => {
+        const task = runWhenIdle(() => {
+            if (shouldMountCamera) {
+                setIsCameraLoading(true);
+            } else {
+                cameraReadyRetryCountRef.current = 0;
+                setIsCameraLoading(false);
+                setTorchEnabled(false);
+            }
+        });
+
+        return task.cancel;
     }, [cameraSessionKey, shouldMountCamera]);
 
     useEffect(() => {
@@ -548,6 +591,19 @@ export default function Scanner() {
         })();
     }, [selectedYear]);
 
+    const handleVisionCameraError = useCallback((error: Error) => {
+        if (visionFallbackShownRef.current) return;
+
+        visionFallbackShownRef.current = true;
+        console.error("VisionCamera 啟動失敗:", error);
+        setRuntimeProviderOverride("expo-camera");
+        queueCameraActivation("vision_camera_fallback");
+        Alert.alert(
+            "VisionCamera 無法使用",
+            "已暫時改用 Expo Camera。安裝或更新相機套件後，需要重新建立 App。",
+        );
+    }, [queueCameraActivation]);
+
     const resolvePreferredBackLens = useCallback((lenses: string[]) => {
         console.log("Available Lenses: ", lenses)
         if (!lenses.length) return undefined;
@@ -575,25 +631,14 @@ export default function Scanner() {
     }, []);
 
     const handleAvailableLensesChanged = useCallback((lenses: string[]) => {
-        setAvailableLenses(lenses);
         const preferredLens = resolvePreferredBackLens(lenses);
         setAutoSelectedLens(preferredLens);
-        selectedLensRef.current = SCANNER_CAMERA_DEBUG_CONTROLS && debugSelectedLens !== AUTO_CAMERA_LENS
-            ? debugSelectedLens
-            : preferredLens;
-        if (debugSelectedLens !== AUTO_CAMERA_LENS && !lenses.includes(debugSelectedLens)) {
-            setDebugSelectedLens(AUTO_CAMERA_LENS);
-        }
-    }, [debugSelectedLens, resolvePreferredBackLens]);
-
-    useEffect(() => {
-        selectedLensRef.current = effectiveSelectedLens;
-    }, [effectiveCameraZoom, effectiveSelectedLens]);
+    }, [resolvePreferredBackLens]);
 
     const handleCameraReady = useCallback(() => {
         cameraReadyRetryCountRef.current = 0;
         setIsCameraLoading(false);
-    }, [effectiveCameraZoom]);
+    }, []);
 
     useEffect(() => {
         if (!permission || permission.granted) return;
@@ -619,13 +664,13 @@ export default function Scanner() {
         onNavigate={handleSearchNavigation}
     ></SearchModal>), [closeSearchModal, handleSearchNavigation, modalVisible])
 
-    if (yearsLoading) {
+    if (yearsLoading || scannerSettingsLoading) {
         return (
             <View style={[styles.container, {marginTop: insets.top}]}>
                 <View style={styles.loadingState}>
                     <ActivityIndicator color="#2563EB" size="large" />
                     <Text mt="md" color="gray700" fontSize="lg" fontWeight="bold">
-                        讀取盤點資料中
+                        準備掃描器中
                     </Text>
                 </View>
             </View>
@@ -686,7 +731,7 @@ export default function Scanner() {
     return (
         <View style={[styles.container, {marginTop: insets.top}]}>
             <View style={styles.headerBlock}>
-                <Text style={styles.scannerTitle}>請掃描財產標籤上的條碼</Text>
+                <ScannerTitle />
                 <Div row justifyContent="center" alignItems="center" style={styles.yearHintRow}>
                     <PropertyYearDropdown
                         compact
@@ -699,16 +744,29 @@ export default function Scanner() {
             </View>
             <View style={styles.cameraFrame}>
                 {shouldMountCamera ? (
-                    <ScannerCamera
-                        sessionKey={cameraSessionKey}
-                        customAutoFocus={customAutoFocus}
-                        selectedLens={effectiveSelectedLens}
-                        zoom={effectiveCameraZoom}
-                        enableTorch={torchEnabled}
-                        onAvailableLensesChanged={handleAvailableLensesChanged}
-                        onBarcodeScanned={navigate}
-                        onReady={handleCameraReady}
-                    />
+                    usesExpoCamera ? (
+                        <ScannerCamera
+                            barcodeTypes={expoCameraBarcodeTypes}
+                            sessionKey={cameraSessionKey}
+                            selectedLens={autoSelectedLens}
+                            zoom={activeZoomPreset.expoZoom}
+                            enableTorch={torchEnabled}
+                            onAvailableLensesChanged={handleAvailableLensesChanged}
+                            onBarcodeScanned={navigate}
+                            onReady={handleCameraReady}
+                        />
+                    ) : (
+                        <VisionCameraScannerSlot
+                            key={cameraSessionKey}
+                            active
+                            barcodeFormats={visionCameraBarcodeFormats}
+                            enableTorch={torchEnabled}
+                            zoom={activeZoomPreset.visionZoom}
+                            onBarcodeScanned={navigate}
+                            onError={handleVisionCameraError}
+                            onReady={handleCameraReady}
+                        />
+                    )
                 ) : (
                     <View style={styles.cameraPlaceholder} />
                 )}
@@ -773,14 +831,14 @@ export default function Scanner() {
                 </TouchableOpacity>
                 <View style={styles.zoomPresetRow}>
                     {SCANNER_CAMERA_ZOOM_PRESETS.map((preset) => {
-                        const selected = Math.abs(scannerZoom - preset.value) < 0.001;
+                        const selected = scannerZoomPreset === preset.id;
 
                         return (
                             <TouchableOpacity
-                                key={preset.label}
+                                key={preset.id}
                                 activeOpacity={0.82}
                                 style={[styles.zoomPresetChip, selected && styles.zoomPresetChipSelected]}
-                                onPress={() => setScannerZoom(preset.value)}
+                                onPress={() => setScannerZoomPreset(preset.id)}
                             >
                                 <Text fontSize="sm" fontWeight="bold" color={selected ? "white" : "gray800"}>
                                     {preset.label}
@@ -789,68 +847,7 @@ export default function Scanner() {
                         );
                     })}
                 </View>
-                {/*<Text mt={6} color="gray600" fontSize="xs" textAlign="center">*/}
-                {/*    目前縮放：{effectiveCameraZoom.toFixed(2)}*/}
-                {/*</Text>*/}
             </View>
-            {SCANNER_CAMERA_DEBUG_CONTROLS && (
-                <View style={styles.debugPanel}>
-                    <Text fontSize="sm" fontWeight="bold">Camera Debug</Text>
-                    <Text mt="xs" fontSize="xs" color="gray600">
-                        Applied: {effectiveSelectedLens ?? "system default"} / zoom {effectiveCameraZoom.toFixed(2)}
-                    </Text>
-                    <Text mt="sm" fontSize="xs" fontWeight="bold" color="gray700">Lens</Text>
-                    <View style={styles.debugRow}>
-                        {[AUTO_CAMERA_LENS, ...availableLenses].map((lens) => {
-                            const label = lens === AUTO_CAMERA_LENS ? `Auto (${autoSelectedLens ?? "default"})` : lens;
-                            const selected = debugSelectedLens === lens;
-                            return (
-                                <TouchableOpacity
-                                    key={lens}
-                                    style={[styles.debugChip, selected && styles.debugChipSelected]}
-                                    activeOpacity={0.8}
-                                    onPress={() => setDebugSelectedLens(lens)}
-                                >
-                                    <Text fontSize="xs" color={selected ? "white" : "gray800"}>
-                                        {label}
-                                    </Text>
-                                </TouchableOpacity>
-                            );
-                        })}
-                    </View>
-                    <Text mt="sm" fontSize="xs" fontWeight="bold" color="gray700">Zoom</Text>
-                    <View
-                        style={styles.debugZoomSlider}
-                        onLayout={(event) => setDebugZoomTrackWidth(event.nativeEvent.layout.width)}
-                        {...debugZoomPanResponder.panHandlers}
-                    >
-                        <View style={styles.debugZoomTrack} pointerEvents="none" />
-                        <View style={[styles.debugZoomTrackFill, {width: `${debugZoomRatio * 100}%`}]} pointerEvents="none" />
-                        <View style={[styles.debugZoomThumb, {left: `${debugZoomRatio * 100}%`}]} pointerEvents="none" />
-                    </View>
-                    <View style={styles.debugZoomScale}>
-                        <Text fontSize="xs" color="gray600">{SCANNER_CAMERA_DEBUG_MIN_ZOOM.toFixed(2)}</Text>
-                        <Text fontSize="xs" color="gray600">{SCANNER_CAMERA_DEBUG_MAX_ZOOM.toFixed(2)}</Text>
-                    </View>
-                    <View style={styles.debugRow}>
-                        {SCANNER_CAMERA_DEBUG_ZOOM_OPTIONS.map((option) => {
-                            const selected = debugZoom === option.value;
-                            return (
-                                <TouchableOpacity
-                                    key={option.label}
-                                    style={[styles.debugChip, selected && styles.debugChipSelected]}
-                                    activeOpacity={0.8}
-                                    onPress={() => setDebugZoom(option.value)}
-                                >
-                                    <Text fontSize="xs" color={selected ? "white" : "gray800"}>
-                                        {option.label}
-                                    </Text>
-                                </TouchableOpacity>
-                            );
-                        })}
-                    </View>
-                </View>
-            )}
             {searchButton}
             {modalComp}
         </View>
@@ -920,11 +917,25 @@ const styles = StyleSheet.create({
         alignItems: "center",
         paddingBottom: 18,
     },
+    scannerTitleRow: {
+        maxWidth: "100%",
+        alignSelf: "center",
+        flexDirection: "row",
+        alignItems: "center",
+    },
     scannerTitle: {
+        flexShrink: 1,
         fontSize: 20,
         fontWeight: "bold",
         color: "#111827",
         textAlign: "center",
+    },
+    cameraSettingsButton: {
+        width: 20,
+        height: 20,
+        marginLeft: 5,
+        alignItems: "center",
+        justifyContent: "center",
     },
     yearHintRow: {
         marginTop: 6,
@@ -1059,66 +1070,6 @@ const styles = StyleSheet.create({
     zoomPresetChipSelected: {
         borderColor: "#2563EB",
         backgroundColor: "#2563EB",
-    },
-    debugPanel: {
-        width: "100%",
-        marginTop: 12,
-        padding: 10,
-        borderRadius: 8,
-        backgroundColor: "#F3F4F6",
-    },
-    debugRow: {
-        flexDirection: "row",
-        flexWrap: "wrap",
-        gap: 8,
-        marginTop: 8,
-    },
-    debugChip: {
-        paddingHorizontal: 10,
-        paddingVertical: 6,
-        borderRadius: 8,
-        borderWidth: 1,
-        borderColor: "#D1D5DB",
-        backgroundColor: "white",
-    },
-    debugChipSelected: {
-        borderColor: "#4F46E5",
-        backgroundColor: "#4F46E5",
-    },
-    debugZoomSlider: {
-        width: "100%",
-        height: 32,
-        justifyContent: "center",
-        marginTop: 8,
-    },
-    debugZoomTrack: {
-        position: "absolute",
-        left: 0,
-        right: 0,
-        height: 6,
-        borderRadius: 3,
-        backgroundColor: "#D1D5DB",
-    },
-    debugZoomTrackFill: {
-        position: "absolute",
-        left: 0,
-        height: 6,
-        borderRadius: 3,
-        backgroundColor: "#4F46E5",
-    },
-    debugZoomThumb: {
-        position: "absolute",
-        width: 18,
-        height: 18,
-        marginLeft: -9,
-        borderRadius: 9,
-        borderWidth: 2,
-        borderColor: "white",
-        backgroundColor: "#4F46E5",
-    },
-    debugZoomScale: {
-        flexDirection: "row",
-        justifyContent: "space-between",
     },
     text: {
         fontSize: 24,

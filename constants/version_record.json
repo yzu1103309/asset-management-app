@@ -1,8 +1,18 @@
 {
   "schemaVersion": 1,
   "app": "Astalog",
-  "updatedAt": "2026-09-10",
+  "updatedAt": "2026-09-12",
   "versions": [
+    {
+      "version": "0.1.1.1",
+      "date": "2026-09-12",
+      "title": "改善條碼掃描與介面",
+      "changes": [
+        "正式版改用 VisionCamera 與 ML Kit 強化條碼辨識。",
+        "新增相機設定，可選擇掃描器提供者與支援的條碼格式。",
+        "UI Fixes & improvements"
+      ]
+    },
     {
       "version": "0.1.1.0",
       "date": "2026-09-10",
