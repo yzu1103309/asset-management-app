@@ -2,7 +2,7 @@
   "expo": {
     "name": "Astalog",
     "slug": "asset-management-app",
-    "version": "0.1.0.0",
+    "version": "0.1.1.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "astalog",
@@ -14,7 +14,7 @@
     "android": {
       "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
-        "backgroundColor": "#4A4A4A",
+        "backgroundColor": "#404040",
         "foregroundImage": "./assets/images/adaptive-icon.png"
       },
       "predictiveBackGestureEnabled": false,
@@ -40,9 +40,9 @@
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 320,
           "resizeMode": "contain",
-          "backgroundColor": "#4A4A4A",
+          "backgroundColor": "#404040",
           "dark": {
-            "backgroundColor": "#4A4A4A"
+            "backgroundColor": "#404040"
           }
         }
       ],

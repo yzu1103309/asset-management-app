@@ -1,6 +1,47 @@
 #!/bin/bash
 set -e
 
+VERSION_RECORD_PATH="constants/version_record.json"
+
+check_version_record() {
+    local version="$1"
+
+    if [[ -z "$version" ]]; then
+        echo "Error: Current version number is empty."
+        exit 1
+    fi
+
+    if [[ ! -f "$VERSION_RECORD_PATH" ]]; then
+        echo "Error: $VERSION_RECORD_PATH not found."
+        exit 1
+    fi
+
+    if ! jq empty "$VERSION_RECORD_PATH" >/dev/null 2>&1; then
+        echo "Error: $VERSION_RECORD_PATH is not valid JSON."
+        exit 1
+    fi
+
+    local match_count
+    match_count=$(jq --arg version "$version" '
+        def normalize: tostring | sub("^v"; "");
+        [
+            .versions[]?
+            | select((.version | normalize) == ($version | normalize))
+            | select((.title | type == "string" and length > 0) and (.changes | type == "array" and length > 0))
+        ]
+        | length
+    ' "$VERSION_RECORD_PATH")
+
+    if [[ "$match_count" == "0" ]]; then
+        echo "Error: $VERSION_RECORD_PATH has no release note for version $version."
+        echo "Please add an entry to $VERSION_RECORD_PATH before running this script."
+        exit 1
+    fi
+
+    echo "Found version record entry for version $version."
+    echo
+}
+
 # --- Step 0: check version number ---
 while true; do
     echo "Confirm current version number"
@@ -43,6 +84,9 @@ while true; do
     echo "Please answer y or n."
     echo
 done
+
+confirmed_version=$(jq -r .expo.version app.json)
+check_version_record "$confirmed_version"
 
 # --- Step 1: git add & commit in current repo ---
 echo "Adding all changes..."

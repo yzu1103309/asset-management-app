@@ -172,14 +172,32 @@ function getDeclaredCharset(bytes: Uint8Array): string | undefined {
     return head.match(/charset\s*=\s*["']?([^"'\s>]+)/i)?.[1]?.toLowerCase();
 }
 
+function isBig5Charset(charset: string | undefined): boolean {
+    return charset === "big5" || charset === "big-5" || charset === "cp950" || charset === "ms950" || charset === "windows-950";
+}
+
+function hasPropertyExportHeaders(html: string): boolean {
+    const text = normalizeHeader(htmlToText(html));
+
+    return text.includes("財產編號")
+        && text.includes("財產名稱")
+        && (text.includes("項次") || text.includes("序號"));
+}
+
 /** Decodes an export using its declared charset before parsing its HTML. */
 export function decodePropertyHtml(bytes: Uint8Array): string {
     const charset = getDeclaredCharset(bytes);
-    if (charset === "big5" || charset === "big-5" || charset === "cp950" || charset === "ms950" || charset === "windows-950") {
+    if (isBig5Charset(charset)) {
         return decodeBig5(bytes);
     }
 
-    return new TextDecoder("utf-8").decode(bytes);
+    const utf8 = new TextDecoder("utf-8").decode(bytes);
+    if (charset === undefined && !hasPropertyExportHeaders(utf8)) {
+        const big5 = decodeBig5(bytes);
+        if (hasPropertyExportHeaders(big5)) return big5;
+    }
+
+    return utf8;
 }
 
 function normalizeHeader(value: string): string {
@@ -240,7 +258,7 @@ export function propertyNumberToBarcode(propertyNumber: string): string {
 }
 
 function isPropertyNumber(value: string): boolean {
-    return /^\d+(?:-\d+)+[，,]\d+$/.test(value.replace(/\s+/g, ""));
+    return /^\d+(?:-\d+){2,}$/.test(propertyNumberToBarcode(value));
 }
 
 export function parsePropertyExportYear(html: string): string | undefined {

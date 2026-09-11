@@ -11,9 +11,11 @@ import {
     Pressable,
     ScrollView,
     StyleSheet,
+    type StyleProp,
     TouchableOpacity,
     useWindowDimensions,
     View,
+    type ViewStyle,
 } from "react-native";
 import {router, useFocusEffect, useLocalSearchParams} from "expo-router";
 import {Image as ExpoImage} from "expo-image";
@@ -894,10 +896,12 @@ function PhotoSourceMenu({
     addingPhoto,
     children,
     onSelect,
+    triggerStyle,
 }: {
     addingPhoto: boolean;
     children: React.ReactNode;
     onSelect: (source: "camera" | "library") => void;
+    triggerStyle?: StyleProp<ViewStyle>;
 }) {
     const actions = useMemo<MenuAction[]>(() => [
         {
@@ -921,7 +925,7 @@ function PhotoSourceMenu({
     }, [onSelect]);
 
     return (
-        <MenuView title="新增照片" actions={actions} onPressAction={handlePressAction}>
+        <MenuView title="新增照片" actions={actions} onPressAction={handlePressAction} style={triggerStyle}>
             {children}
         </MenuView>
     );
@@ -1491,10 +1495,14 @@ function PropertyDetailBlock({
                         </ScrollView>
                     )}
                     {photoCount === 0 && (
-                        <PhotoSourceMenu addingPhoto={addingPhoto} onSelect={(source) => onAddPhoto(item, actualEntityIndex, source)}>
+                        <PhotoSourceMenu
+                            addingPhoto={addingPhoto}
+                            onSelect={(source) => onAddPhoto(item, actualEntityIndex, source)}
+                            triggerStyle={styles.addPhotoMenuTrigger}
+                        >
                             <View style={[styles.addPhotoButton, addingPhoto && styles.addPhotoButtonDisabled]}>
-                                <Icon name="library-add" fontFamily="MaterialIcons" color="#2563EB" fontSize="sm" mr="sm" />
-                                <Text color="#1D4ED8" fontWeight="bold" fontSize="md">
+                                <Icon name="library-add" fontFamily="MaterialIcons" color="#2563EB" fontSize="sm" mr="sm" style={styles.addPhotoButtonIcon} />
+                                <Text color="#1D4ED8" fontWeight="bold" fontSize="md" style={styles.addPhotoButtonText}>
                                     {addingPhoto ? "處理照片中..." : "新增照片"}
                                 </Text>
                             </View>
@@ -3213,6 +3221,7 @@ const styles = StyleSheet.create({
         borderStyle: "dashed",
     },
     addPhotoButton: {
+        width: "100%",
         minHeight: 48,
         marginTop: 4,
         marginBottom: 4,
@@ -3223,7 +3232,21 @@ const styles = StyleSheet.create({
         backgroundColor: "#EFF6FF",
         borderWidth: 1,
         borderColor: "#BFDBFE",
-        borderStyle: "dashed"
+        borderStyle: "dashed",
+        flexShrink: 0,
+    },
+    addPhotoMenuTrigger: {
+        width: "100%",
+        alignSelf: "stretch",
+        flexShrink: 0,
+    },
+    addPhotoButtonIcon: {
+        flexShrink: 0,
+    },
+    addPhotoButtonText: {
+        flexShrink: 1,
+        minWidth: 0,
+        textAlign: "center",
     },
     addPhotoButtonDisabled: {
         opacity: 0.62,
