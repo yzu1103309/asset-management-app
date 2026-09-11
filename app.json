@@ -9,7 +9,7 @@
     "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
-      "deploymentTarget": "15.5",
+      "deploymentTarget": "16.4",
       "bundleIdentifier": "com.yzu1103309.Astalog",
       "infoPlist": {
         "NSCameraUsageDescription": "允許開啟相機，用於掃描財產條碼與拍攝財產照片。"
