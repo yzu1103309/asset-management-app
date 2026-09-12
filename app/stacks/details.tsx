@@ -1521,9 +1521,9 @@ function PropertyDetailBlock({
                         <PhotoSourceMenu
                             addingPhoto={addingPhoto}
                             onSelect={(source) => onAddPhoto(item, actualEntityIndex, source)}
-                            triggerStyle={[styles.addPhotoMenuTrigger, {width: addPhotoButtonWidth}]}
+                            triggerStyle={[styles.addPhotoMenuTrigger]}
                         >
-                            <View style={[styles.addPhotoButton, addingPhoto && styles.addPhotoButtonDisabled]}>
+                            <View style={[styles.addPhotoButton, addingPhoto && styles.addPhotoButtonDisabled, {width: addPhotoButtonWidth}]}>
                                 <Icon name="library-add" fontFamily="MaterialIcons" color="#2563EB" fontSize="sm" mr="sm" style={styles.addPhotoButtonIcon} />
                                 <Text color="#1D4ED8" fontWeight="bold" fontSize="md" style={styles.addPhotoButtonText}>
                                     {addingPhoto ? "處理照片中..." : "新增照片"}
@@ -3268,13 +3268,9 @@ const styles = StyleSheet.create({
     },
     addPhotoMenuTrigger: {
         width: "100%",
-        alignSelf: "stretch",
-        flexShrink: 0,
     },
     addPhotoMenuInnerTrigger: {
-        width: "100%",
-        alignSelf: "stretch",
-        flexShrink: 0,
+        alignSelf: "center",
     },
     addPhotoButtonIcon: {
         flexShrink: 0,
