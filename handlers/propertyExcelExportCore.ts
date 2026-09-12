@@ -1,4 +1,5 @@
 import {
+    getPropertyItemByEntityKey,
     getPropertyItemDisplayName,
     getPropertyItemDisplayNumber,
     type PropertyItemsByBarcode,
@@ -27,10 +28,12 @@ const XLSX_EXPORT_COLUMNS = [
     "財產名稱",
     "保管人",
     "盤點狀態",
+    "上層關聯財產",
     "位置區域",
     "詳細位置描述",
     "其他備註",
 ] as const;
+const PROPERTY_NAME_COLUMN_INDEX = XLSX_EXPORT_COLUMNS.findIndex((column) => column === "財產名稱");
 const STATUS_COLUMN_INDEX = XLSX_EXPORT_COLUMNS.findIndex((column) => column === "盤點狀態");
 const CELL_STYLE_IDS = {
     body: 0,
@@ -38,8 +41,9 @@ const CELL_STYLE_IDS = {
     unknown: 2,
     checked: 3,
     pending: 4,
+    propertyName: 5,
 } as const;
-const COLUMN_WIDTHS = [8, 20, 34, 14, 12, 18, 30, 30] as const;
+const COLUMN_WIDTHS = [8, 20, 34, 14, 12, 38, 18, 30, 30] as const;
 
 export type PropertyExcelRow = {
     itemNumber: string;
@@ -47,6 +51,7 @@ export type PropertyExcelRow = {
     barcode: string;
     entityIndex: number;
     propertyName: string;
+    parentProperty: string;
     custodianName: string;
     statusesByYear: Record<string, string>;
     areaName: string;
@@ -152,6 +157,16 @@ function getEntityStatusMap(
     return entityStatusMap;
 }
 
+function getParentPropertyLabel(
+    itemsByBarcode: PropertyItemsByBarcode,
+    parentEntityKey: string | null | undefined,
+): string {
+    const parentItem = getPropertyItemByEntityKey(itemsByBarcode, parentEntityKey);
+    if (!parentItem) return "";
+
+    return `${getPropertyItemDisplayName(parentItem)}\n（${parentItem.barcode}）`;
+}
+
 export function buildPropertyExcelRows(
     itemsByBarcode: PropertyItemsByBarcode,
     years: string[],
@@ -187,6 +202,7 @@ export function buildPropertyExcelRows(
                 barcode: item.barcode,
                 entityIndex,
                 propertyName: getPropertyItemDisplayName(item),
+                parentProperty: getParentPropertyLabel(itemsByBarcode, item.parentEntityKey),
                 custodianName: item.custodianName ?? "",
                 statusesByYear,
                 areaName: item.location?.areaName ?? "",
@@ -245,25 +261,57 @@ function getRowValues(row: PropertyExcelRow, year: string): unknown[] {
         row.propertyName,
         row.custodianName,
         row.statusesByYear[year] ?? "",
+        row.parentProperty,
         row.areaName,
         row.locationDescription,
         row.note,
     ];
 }
 
+function getBarcodeMergeRanges(rows: PropertyExcelRow[]): string[] {
+    const ranges: string[] = [];
+    let groupStartIndex = 0;
+
+    while (groupStartIndex < rows.length) {
+        const barcode = rows[groupStartIndex].barcode;
+        let groupEndIndex = groupStartIndex + 1;
+
+        while (groupEndIndex < rows.length && rows[groupEndIndex].barcode === barcode) {
+            groupEndIndex += 1;
+        }
+
+        if (groupEndIndex - groupStartIndex > 1) {
+            // Row 1 is the header and column B is 財產編號.
+            ranges.push(`B${groupStartIndex + 2}:B${groupEndIndex + 1}`);
+        }
+        groupStartIndex = groupEndIndex;
+    }
+
+    return ranges;
+}
+
 function buildWorksheetXml(rows: PropertyExcelRow[], year: string): string {
+    const yearRows = getYearRows(rows, year);
     const sheetRows = [
         worksheetRow([...XLSX_EXPORT_COLUMNS], 1, () => CELL_STYLE_IDS.header),
-        ...getYearRows(rows, year).map((row, index) => worksheetRow(getRowValues(row, year), index + 2, (value, columnIndex) => (
-            columnIndex === STATUS_COLUMN_INDEX ? getStatusCellStyleId(value) : CELL_STYLE_IDS.body
+        ...yearRows.map((row, index) => worksheetRow(getRowValues(row, year), index + 2, (value, columnIndex) => (
+            columnIndex === STATUS_COLUMN_INDEX
+                ? getStatusCellStyleId(value)
+                : columnIndex === PROPERTY_NAME_COLUMN_INDEX
+                    ? CELL_STYLE_IDS.propertyName
+                    : CELL_STYLE_IDS.body
         ))),
     ].join("");
     const columnXml = COLUMN_WIDTHS.map((width, index) => (
         `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`
     )).join("");
+    const barcodeMergeRanges = getBarcodeMergeRanges(yearRows);
+    const mergeCellsXml = barcodeMergeRanges.length > 0
+        ? `<mergeCells count="${barcodeMergeRanges.length}">${barcodeMergeRanges.map((range) => `<mergeCell ref="${range}"/>`).join("")}</mergeCells>`
+        : "";
 
     return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols>${columnXml}</cols><sheetData>${sheetRows}</sheetData></worksheet>`;
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols>${columnXml}</cols><sheetData>${sheetRows}</sheetData>${mergeCellsXml}</worksheet>`;
 }
 
 function sanitizeWorksheetName(value: string): string {
@@ -333,12 +381,13 @@ function buildStylesXml(): string {
     <cellStyleXfs count="1">
         <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
     </cellStyleXfs>
-    <cellXfs count="5">
-        <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"><alignment vertical="top" wrapText="1"/></xf>
+    <cellXfs count="6">
+        <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
         <xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
-        <xf numFmtId="0" fontId="0" fillId="3" borderId="1" xfId="0" applyFill="1" applyBorder="1"><alignment vertical="top" wrapText="1"/></xf>
-        <xf numFmtId="0" fontId="0" fillId="4" borderId="1" xfId="0" applyFill="1" applyBorder="1"><alignment vertical="top" wrapText="1"/></xf>
-        <xf numFmtId="0" fontId="0" fillId="5" borderId="1" xfId="0" applyFill="1" applyBorder="1"><alignment vertical="top" wrapText="1"/></xf>
+        <xf numFmtId="0" fontId="0" fillId="3" borderId="1" xfId="0" applyFill="1" applyBorder="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+        <xf numFmtId="0" fontId="0" fillId="4" borderId="1" xfId="0" applyFill="1" applyBorder="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+        <xf numFmtId="0" fontId="0" fillId="5" borderId="1" xfId="0" applyFill="1" applyBorder="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+        <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"><alignment vertical="center" wrapText="1"/></xf>
     </cellXfs>
     <cellStyles count="1">
         <cellStyle name="Normal" xfId="0" builtinId="0"/>

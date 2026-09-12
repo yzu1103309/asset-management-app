@@ -145,6 +145,7 @@ test("exports every split physical entity with its display number and local name
                 location: {areaId: "b", areaName: "會議室", description: "牆上"},
                 note: "螢幕",
                 split: {groupId: "split-1", part: 2, name: "DELL 24 吋螢幕"},
+                parentEntityKey: "A-002::entity:0",
             },
         ],
     }, ["115"], {
@@ -158,13 +159,17 @@ test("exports every split physical entity with its display number and local name
     assert.deepEqual(rows.map((row) => ({
         itemNumber: row.itemNumber,
         propertyName: row.propertyName,
+        parentProperty: row.parentProperty,
         status: row.statusesByYear["115"],
         areaName: row.areaName,
         note: row.note,
     })), [
-        {itemNumber: "32-1", propertyName: "ASUS 自組電腦", status: "未清點", areaName: "辦公室", note: "主機"},
-        {itemNumber: "32-2", propertyName: "DELL 24 吋螢幕", status: "已確認", areaName: "會議室", note: "螢幕"},
+        {itemNumber: "32-1", propertyName: "ASUS 自組電腦", parentProperty: "", status: "未清點", areaName: "辦公室", note: "主機"},
+        {itemNumber: "32-2", propertyName: "DELL 24 吋螢幕", parentProperty: "ASUS 自組電腦\n（A-002）", status: "已確認", areaName: "會議室", note: "螢幕"},
     ]);
+
+    const decoded = new TextDecoder().decode(buildPropertyExcelXlsx(rows, ["115"], new Date("2026-08-31T05:06:07")));
+    assert.match(decoded, /<mergeCells count="1"><mergeCell ref="B2:B3"\/><\/mergeCells>/);
 });
 
 test("builds minimal xlsx workbook with annual worksheets and escaped user content", () => {
@@ -205,6 +210,8 @@ test("builds minimal xlsx workbook with annual worksheets and escaped user conte
     assert.match(decoded, /盤點狀態/);
     assert.match(decoded, /<c r="E1" s="1" t="inlineStr">/);
     assert.match(decoded, /<c r="E2" s="2" t="inlineStr">/);
+    assert.match(decoded, /<c r="C2" s="5" t="inlineStr">/);
+    assert.match(decoded, /<cellXfs count="6">/);
     assert.doesNotMatch(decoded, /同財編實體序號/);
     assert.doesNotMatch(decoded, /匯入年度/);
     assert.doesNotMatch(decoded, /位置區域 ID/);

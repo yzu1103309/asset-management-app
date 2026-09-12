@@ -1631,7 +1631,7 @@ function PropertyDetailBlock({
                         isSplit={!!item.split}
                     />
                 )}
-                <Text textAlign="center" color={statusColors.barcodeColor} fontWeight="bold" fontSize="2xl">{item.propertyName}</Text>
+                <Text textAlign="center" selectable color={statusColors.barcodeColor} fontWeight="bold" fontSize="2xl">{item.propertyName}</Text>
             </View>
             <View style={styles.summaryMetaRow}>
                 <View style={[styles.summarySubCard, {backgroundColor: statusColors.cardBg}]}>
