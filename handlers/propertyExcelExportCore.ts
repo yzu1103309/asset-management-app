@@ -1,4 +1,8 @@
-import {getPropertyItemNumberForYear, type PropertyItemsByBarcode} from "./propertyItemStore.ts";
+import {
+    getPropertyItemDisplayName,
+    getPropertyItemDisplayNumber,
+    type PropertyItemsByBarcode,
+} from "./propertyItemStore.ts";
 import {
     expandLegacyAnnualStatusEntries,
     parsePropertyStatusEntryKey,
@@ -174,15 +178,15 @@ export function buildPropertyExcelRows(
             }
 
             rows.push({
-                itemNumber: getPropertyItemNumberForYear(item, years[0]),
+                itemNumber: getPropertyItemDisplayNumber(item, years[0]),
                 itemNumbersByYear: Object.fromEntries(
                     years
                         .filter((year) => itemExistsInPropertyYear(item.sourceYears, year))
-                        .map((year) => [year, getPropertyItemNumberForYear(item, year)]),
+                        .map((year) => [year, getPropertyItemDisplayNumber(item, year)]),
                 ),
                 barcode: item.barcode,
                 entityIndex,
-                propertyName: item.propertyName,
+                propertyName: getPropertyItemDisplayName(item),
                 custodianName: item.custodianName ?? "",
                 statusesByYear,
                 areaName: item.location?.areaName ?? "",

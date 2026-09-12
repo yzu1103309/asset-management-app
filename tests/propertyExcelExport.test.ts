@@ -119,6 +119,54 @@ test("exports item numbers from each annual source year", () => {
     assert.match(decoded, /<c r="A2" s="0" t="inlineStr"><is><t>1<\/t><\/is><\/c>/);
 });
 
+test("exports every split physical entity with its display number and local name", () => {
+    const rows = buildPropertyExcelRows({
+        "A-002": [
+            {
+                itemNumber: "32",
+                barcode: "A-002",
+                propertyName: "主機及螢幕",
+                custodianName: "王小明",
+                createdAt: "2026-01-01T00:00:00.000Z",
+                updatedAt: "2026-01-02T00:00:00.000Z",
+                sourceYears: ["115"],
+                location: {areaId: "a", areaName: "辦公室", description: "桌上"},
+                note: "主機",
+                split: {groupId: "split-1", part: 1, name: "ASUS 自組電腦"},
+            },
+            {
+                itemNumber: "32",
+                barcode: "A-002",
+                propertyName: "主機及螢幕",
+                custodianName: "王小明",
+                createdAt: "2026-01-01T00:00:00.000Z",
+                updatedAt: "2026-01-02T00:00:00.000Z",
+                sourceYears: ["115"],
+                location: {areaId: "b", areaName: "會議室", description: "牆上"},
+                note: "螢幕",
+                split: {groupId: "split-1", part: 2, name: "DELL 24 吋螢幕"},
+            },
+        ],
+    }, ["115"], {
+        "115": {
+            unknown: [getPropertyStatusEntryKey("A-002", 0)],
+            checked: [getPropertyStatusEntryKey("A-002", 1)],
+            pending: [],
+        },
+    });
+
+    assert.deepEqual(rows.map((row) => ({
+        itemNumber: row.itemNumber,
+        propertyName: row.propertyName,
+        status: row.statusesByYear["115"],
+        areaName: row.areaName,
+        note: row.note,
+    })), [
+        {itemNumber: "32-1", propertyName: "ASUS 自組電腦", status: "未清點", areaName: "辦公室", note: "主機"},
+        {itemNumber: "32-2", propertyName: "DELL 24 吋螢幕", status: "已確認", areaName: "會議室", note: "螢幕"},
+    ]);
+});
+
 test("builds minimal xlsx workbook with annual worksheets and escaped user content", () => {
     const rows = buildPropertyExcelRows({
         "A-001": [
