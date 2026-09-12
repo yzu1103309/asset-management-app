@@ -700,7 +700,7 @@ export default function Scanner() {
                     </View>
                 )}
                 {shouldMountCamera && isCameraLoading && (
-                    <View style={styles.cameraLoadingOverlay} pointerEvents="none">
+                    <View style={styles.cameraLoadingOverlay}>
                         <ActivityIndicator color="white" size="large" />
                         <Text mt="sm" color="white" fontSize="md" fontWeight="bold">
                             相機啟動中

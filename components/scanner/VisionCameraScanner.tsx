@@ -29,6 +29,7 @@ const VisionCameraScanner = memo(function VisionCameraScanner({
     onReady,
 }: VisionCameraScannerProps) {
     const [isPreviewStarted, setIsPreviewStarted] = useState(false);
+    const [areCameraControlsReady, setAreCameraControlsReady] = useState(false);
     const cameraRef = useRef<CameraRef>(null);
     const zoomOperationRef = useRef<Promise<void>>(Promise.resolve());
     const torchOperationRef = useRef<Promise<void>>(Promise.resolve());
@@ -59,6 +60,7 @@ const VisionCameraScanner = memo(function VisionCameraScanner({
         if (readyReportedRef.current) return;
 
         readyReportedRef.current = true;
+        setAreCameraControlsReady(true);
         onReady();
     }, [onReady]);
 
@@ -85,7 +87,11 @@ const VisionCameraScanner = memo(function VisionCameraScanner({
             const controller = cameraRef.current?.controller;
             if (!controller) throw new Error("VisionCamera 控制器尚未就緒。");
 
-            await controller.setZoom(effectiveZoom);
+            const sessionZoom = Math.min(
+                controller.maxZoom,
+                Math.max(controller.minZoom, effectiveZoom),
+            );
+            await controller.setZoom(sessionZoom);
             if (effectActive) reportReady();
         });
         zoomOperationRef.current = operation.catch((error: unknown) => {
@@ -130,8 +136,7 @@ const VisionCameraScanner = memo(function VisionCameraScanner({
             device={device}
             isActive={active}
             outputs={outputs}
-            enableDistortionCorrection={false}
-            enableNativeTapToFocusGesture
+            enableNativeTapToFocusGesture={areCameraControlsReady && device.supportsFocusMetering}
             resizeMode="cover"
             onPreviewStarted={handlePreviewStarted}
             onError={onError}
