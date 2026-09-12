@@ -33,9 +33,15 @@ import {
     type VisionCameraBarcodeFormat,
 } from "@/handlers/scannerSettings";
 
+type ClipboardModule = {
+    setStringAsync: (text: string) => Promise<boolean>;
+};
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const Clipboard = require("expo-clipboard") as ClipboardModule;
+
 const CAMERA_IDLE_TIMEOUT_MS = 60 * 1000;
-const CAMERA_READY_RETRY_MS = 1500;
-const CAMERA_READY_MAX_RETRIES = 2;
+const CAMERA_LOADING_TIMEOUT_MS = 10 * 1000;
+const CAMERA_REVEAL_DELAY_MS = 300;
 type ScannerZoomPresetId = "wide" | "standard" | "closer" | "maximum";
 const SCANNER_CAMERA_ZOOM_PRESETS = [
     {id: "wide", label: "較廣", expoZoom: 0.08, visionZoom: 1},
@@ -55,25 +61,21 @@ const absoluteFill = {
     bottom: 0,
     left: 0,
 };
-type CancelableTask = {cancel: () => void};
-type IdleApi = typeof globalThis & {
-    requestIdleCallback?: (callback: () => void, options?: {timeout?: number}) => number;
-    cancelIdleCallback?: (handle: number) => void;
-};
-
-function runWhenIdle(callback: () => void): CancelableTask {
-    const idleApi = globalThis as IdleApi;
-    if (typeof idleApi.requestIdleCallback === "function") {
-        const handle = idleApi.requestIdleCallback(callback, {timeout: 300});
-        return {cancel: () => idleApi.cancelIdleCallback?.(handle)};
-    }
-
-    const timeout = setTimeout(callback, 16);
-    return {cancel: () => clearTimeout(timeout)};
-}
 
 function getItemSourceYears(items: Awaited<ReturnType<typeof getPropertyItemsByBarcode>>): string[] {
     return [...new Set(items.flatMap((item) => item.sourceYears))].sort(comparePropertyYearsDescending);
+}
+
+function showCameraErrorAlert(title: string, error: unknown) {
+    const fullError = error instanceof Error && error.stack ? error.stack : String(error);
+    const errorSummary = fullError.split(/\r?\n/).slice(0, 2).join("\n");
+
+    void Clipboard.setStringAsync(fullError)
+        .then(() => Alert.alert(`${title}（完整錯誤已複製）`, errorSummary))
+        .catch((clipboardError) => {
+            console.error("複製相機錯誤失敗:", clipboardError);
+            Alert.alert(title, errorSummary);
+        });
 }
 
 function ScannerTitle() {
@@ -96,41 +98,42 @@ function ScannerTitle() {
 
 type ScannerCameraProps = {
     barcodeTypes: BarcodeType[];
-    sessionKey: number;
-    selectedLens?: string;
     zoom: number;
     enableTorch: boolean;
-    onAvailableLensesChanged: (lenses: string[]) => void;
     onBarcodeScanned: (isbn: string) => void;
+    onError: (error: Error) => void;
     onReady: () => void;
 };
 
 const ScannerCamera = memo(function ScannerCamera({
     barcodeTypes,
-    sessionKey,
-    selectedLens,
     zoom,
     enableTorch,
-    onAvailableLensesChanged,
     onBarcodeScanned,
+    onError,
     onReady,
 }: ScannerCameraProps) {
+    const [isReady, setIsReady] = useState(false);
+    const handleReady = useCallback(() => {
+        setIsReady(true);
+        onReady();
+    }, [onReady]);
+
     return (
         <CameraView
-            key={sessionKey}
-            active={true}
             style={styles.camera}
             facing="back"
             barcodeScannerSettings={{
                 barcodeTypes,
             }}
-            onAvailableLensesChanged={({lenses}) => onAvailableLensesChanged(lenses)}
-            onBarcodeScanned={(scanningResult) => onBarcodeScanned(scanningResult.data)}
-            selectedLens={selectedLens}
+            onBarcodeScanned={isReady
+                ? (scanningResult) => onBarcodeScanned(scanningResult.data)
+                : undefined}
             zoom={zoom}
-            enableTorch={enableTorch}
-            autofocus="on"
-            onCameraReady={onReady}
+            enableTorch={isReady && enableTorch}
+            autofocus="off"
+            onCameraReady={handleReady}
+            onMountError={({message}) => onError(new Error(message))}
         />
     );
 });
@@ -148,7 +151,11 @@ type VisionCameraScannerProps = {
 let visionCameraModulePromise: Promise<{default: ComponentType<VisionCameraScannerProps>}> | null = null;
 
 function loadVisionCameraScanner() {
-    visionCameraModulePromise ??= import("@/components/scanner/VisionCameraScanner");
+    visionCameraModulePromise ??= import("@/components/scanner/VisionCameraScanner")
+        .catch((error: unknown) => {
+            visionCameraModulePromise = null;
+            throw error;
+        });
     return visionCameraModulePromise;
 }
 
@@ -183,8 +190,7 @@ export default function Scanner() {
     const [isAppActive, setIsAppActive] = useState(AppState.currentState === "active");
     const [isCameraActive, setIsCameraActive] = useState(true);
     const [isCameraLoading, setIsCameraLoading] = useState(true);
-    const [cameraSessionKey, setCameraSessionKey] = useState(0);
-    const [autoSelectedLens, setAutoSelectedLens] = useState<string | undefined>(undefined);
+    const [isCameraReady, setIsCameraReady] = useState(false);
     const [scannerZoomPreset, setScannerZoomPreset] = useState<ScannerZoomPresetId>("standard");
     const [torchEnabled, setTorchEnabled] = useState(false);
     const [modalVisible, setModalVisible] = useState(false);
@@ -192,16 +198,15 @@ export default function Scanner() {
     const [scanned, setScanned] = useState("")
     const reopenSearchOnFocusRef = useRef(false);
     const searchOpenRequestIdRef = useRef(0);
-    const pauseCameraTaskRef = useRef<CancelableTask | null>(null);
-    const resumeCameraTaskRef = useRef<CancelableTask | null>(null);
     const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const cameraRevealTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const cameraReadyReportedRef = useRef(false);
     const idleAlertVisibleRef = useRef(false);
     const appStateRef = useRef<AppStateStatus>(AppState.currentState);
     const scannerFocusedRef = useRef(false);
-    const permissionMissingLogKeyRef = useRef<string | null>(null);
     const barcodeScanHandlingRef = useRef(false);
-    const cameraReadyRetryCountRef = useRef(0);
     const visionFallbackShownRef = useRef(false);
+    const expoCameraErrorShownRef = useRef(false);
     const insets = useSafeAreaInsets()
     const hasImportedPropertyYears = availableYears.length > 0;
     const configuredProvider = resolveScannerProvider(scannerSettings.provider);
@@ -218,64 +223,39 @@ export default function Scanner() {
         [scannerSettings.enabledFormats],
     );
 
-    // console.log("Scanner Page Rerender")
-
-    const cancelPendingCameraPause = () => {
-        if(pauseCameraTaskRef.current) {
-            pauseCameraTaskRef.current.cancel();
-            pauseCameraTaskRef.current = null;
-        }
-    };
-
-    const cancelPendingCameraResume = () => {
-        if(resumeCameraTaskRef.current) {
-            resumeCameraTaskRef.current.cancel();
-            resumeCameraTaskRef.current = null;
-        }
-    };
-
-    const clearCameraIdleTimer = () => {
+    const clearCameraIdleTimer = useCallback(() => {
         if (idleTimerRef.current) {
             clearTimeout(idleTimerRef.current);
             idleTimerRef.current = null;
         }
-    };
+    }, []);
 
-    const pauseCamera = useCallback((reason: string) => {
+    const clearCameraRevealTimer = useCallback(() => {
+        if (cameraRevealTimerRef.current) {
+            clearTimeout(cameraRevealTimerRef.current);
+            cameraRevealTimerRef.current = null;
+        }
+    }, []);
+
+    const pauseCamera = useCallback(() => {
         clearCameraIdleTimer();
-        cancelPendingCameraResume();
+        clearCameraRevealTimer();
+        cameraReadyReportedRef.current = false;
+        setIsCameraReady(false);
         setIsCameraActive(false);
         setIsCameraLoading(false);
-    }, []);
+        setTorchEnabled(false);
+    }, [clearCameraIdleTimer, clearCameraRevealTimer]);
 
-    const activateCamera = useCallback((reason: string) => {
+    const activateCamera = useCallback(() => {
         clearCameraIdleTimer();
+        clearCameraRevealTimer();
+        cameraReadyReportedRef.current = false;
         idleAlertVisibleRef.current = false;
-        cameraReadyRetryCountRef.current = 0;
-        cancelPendingCameraPause();
-        cancelPendingCameraResume();
+        setIsCameraReady(false);
         setIsCameraLoading(true);
         setIsCameraActive(true);
-        setCameraSessionKey((key) => key + 1);
-    }, []);
-
-    const queueCameraActivation = useCallback((reason: string, restartSession = true) => {
-        clearCameraIdleTimer();
-        idleAlertVisibleRef.current = false;
-        cameraReadyRetryCountRef.current = 0;
-        cancelPendingCameraPause();
-        cancelPendingCameraResume();
-        setIsCameraActive(false);
-        setIsCameraLoading(true);
-
-        resumeCameraTaskRef.current = runWhenIdle(() => {
-            setIsCameraActive(true);
-            if (restartSession) {
-                setCameraSessionKey((key) => key + 1);
-            }
-            resumeCameraTaskRef.current = null;
-        });
-    }, []);
+    }, [clearCameraIdleTimer, clearCameraRevealTimer]);
 
     const resetCameraIdleTimer = useCallback(() => {
         clearCameraIdleTimer();
@@ -293,12 +273,12 @@ export default function Scanner() {
             if (idleAlertVisibleRef.current) return;
 
             if (appStateRef.current !== "active" || !scannerFocusedRef.current) {
-                pauseCamera("idle_timeout_while_not_foreground");
+                pauseCamera();
                 return;
             }
 
             idleAlertVisibleRef.current = true;
-            pauseCamera("idle_timeout_auto_sleep");
+            pauseCamera();
             Alert.alert(
                 "相機已休眠",
                 "已經一段時間沒有使用\n已先暫停相機",
@@ -308,7 +288,7 @@ export default function Scanner() {
                         style: "cancel",
                         onPress: () => {
                             idleAlertVisibleRef.current = false;
-                            activateCamera("idle_sleep_cancelled");
+                            activateCamera();
                         },
                     },
                     {
@@ -320,17 +300,14 @@ export default function Scanner() {
                 ],
             );
         }, CAMERA_IDLE_TIMEOUT_MS);
-    }, [activateCamera, hasImportedPropertyYears, isAppActive, isCameraActive, isScannerFocused, modalVisible, pauseCamera, permission?.granted, yearsLoading]);
+    }, [activateCamera, clearCameraIdleTimer, hasImportedPropertyYears, isAppActive, isCameraActive, isScannerFocused, modalVisible, pauseCamera, permission?.granted, yearsLoading]);
 
     const openSearchModal = useCallback(() => {
         reopenSearchOnFocusRef.current = false;
         searchOpenRequestIdRef.current += 1;
         const requestId = searchOpenRequestIdRef.current;
         setModalVisible(false);
-        cancelPendingCameraPause();
-        cancelPendingCameraResume();
-        clearCameraIdleTimer();
-        pauseCamera("search_modal_open_requested");
+        pauseCamera();
         requestAnimationFrame(() => {
             requestAnimationFrame(() => {
                 if (searchOpenRequestIdRef.current !== requestId) return;
@@ -342,40 +319,30 @@ export default function Scanner() {
     const closeSearchModal = useCallback(() => {
         reopenSearchOnFocusRef.current = false;
         searchOpenRequestIdRef.current += 1;
-        cancelPendingCameraPause();
-        cancelPendingCameraResume();
         setModalVisible(false);
-        queueCameraActivation("search_modal_closed");
-    }, [queueCameraActivation]);
-
-    const refreshAvailableYears = useCallback(async () => {
-        await refreshYears();
-    }, [refreshYears]);
+        activateCamera();
+    }, [activateCamera]);
 
     const pauseForYearSelection = useCallback(() => {
-        pauseCamera("year_dropdown_opened");
+        pauseCamera();
     }, [pauseCamera]);
 
     const resumeAfterYearSelection = useCallback(() => {
         if (scannerFocusedRef.current && !modalVisible) {
-            queueCameraActivation("year_dropdown_closed", false);
+            activateCamera();
         }
-    }, [modalVisible, queueCameraActivation]);
+    }, [activateCamera, modalVisible]);
 
     const handleSearchNavigation = useCallback((shouldReopenOnReturn: boolean) => {
         reopenSearchOnFocusRef.current = shouldReopenOnReturn;
         searchOpenRequestIdRef.current += 1;
-        cancelPendingCameraPause();
-        cancelPendingCameraResume();
-        clearCameraIdleTimer();
         setModalVisible(false);
-        pauseCamera("search_result_navigation");
+        pauseCamera();
     }, [pauseCamera]);
 
     async function handlePermission() {
         try {
             const response = await requestPermission();
-            console.log("Permission response:", response);
             if(!response.canAskAgain) {
                 Alert.alert(
                     '權限請求失敗',
@@ -394,11 +361,12 @@ export default function Scanner() {
             let focusActive = true;
             const shouldReopenSearch = reopenSearchOnFocusRef.current;
 
-            console.log("Reopen search on focus:", shouldReopenSearch)
             scannerFocusedRef.current = true;
             visionFallbackShownRef.current = false;
+            expoCameraErrorShownRef.current = false;
+            setIsCameraReady(false);
             setIsScannerFocused(true);
-            void refreshAvailableYears();
+            void refreshYears();
             setScannerSettingsLoading(true);
             setRuntimeProviderOverride(null);
             void getStoredScannerSettings()
@@ -411,24 +379,26 @@ export default function Scanner() {
                 });
             setModalVisible(shouldReopenSearch)
             if (shouldReopenSearch) {
-                pauseCamera("scanner_focus_reopen_search");
+                pauseCamera();
+            } else {
+                activateCamera();
             }
             setScanned("")
 
             return () => {
                 focusActive = false;
                 searchOpenRequestIdRef.current += 1;
-                cancelPendingCameraPause();
-                cancelPendingCameraResume();
                 clearCameraIdleTimer();
+                clearCameraRevealTimer();
                 idleAlertVisibleRef.current = false;
                 scannerFocusedRef.current = false;
                 setIsScannerFocused(false);
                 setModalVisible(false)
+                setIsCameraReady(false);
                 setIsCameraActive(false);
                 setIsCameraLoading(false);
             };
-        }, [pauseCamera, refreshAvailableYears])
+        }, [activateCamera, clearCameraIdleTimer, clearCameraRevealTimer, pauseCamera, refreshYears])
     );
 
     useEffect(() => {
@@ -442,77 +412,52 @@ export default function Scanner() {
             if (!isNowActive) {
                 idleAlertVisibleRef.current = false;
                 clearCameraIdleTimer();
-                cancelPendingCameraPause();
-                cancelPendingCameraResume();
                 if (scannerFocusedRef.current) {
-                    pauseCamera("app_state_not_active");
+                    pauseCamera();
                 }
                 return;
             }
 
             if (!wasActive && scannerFocusedRef.current && !modalVisible) {
-                queueCameraActivation("app_state_active");
+                activateCamera();
             }
         };
 
         const subscription = AppState.addEventListener("change", handleAppStateChange);
 
         return () => subscription.remove();
-    }, [modalVisible, pauseCamera, queueCameraActivation]);
+    }, [activateCamera, clearCameraIdleTimer, modalVisible, pauseCamera]);
 
     useEffect(() => {
         return () => {
             searchOpenRequestIdRef.current += 1;
-            cancelPendingCameraPause();
-            cancelPendingCameraResume();
             clearCameraIdleTimer();
+            clearCameraRevealTimer();
         };
-    }, []);
+    }, [clearCameraIdleTimer, clearCameraRevealTimer]);
 
     const shouldMountCamera = !scannerSettingsLoading && !!permission?.granted && hasImportedPropertyYears && !yearsLoading && isAppActive && isScannerFocused && !modalVisible && isCameraActive;
-
-    useEffect(() => {
-        if (scannerSettingsLoading || !isScannerFocused || modalVisible || !hasImportedPropertyYears) return;
-
-        const task = runWhenIdle(() => {
-            queueCameraActivation("scanner_provider_ready");
-        });
-        return task.cancel;
-    }, [hasImportedPropertyYears, isScannerFocused, modalVisible, queueCameraActivation, scannerSettingsLoading]);
-
-    useEffect(() => {
-        const task = runWhenIdle(() => {
-            if (shouldMountCamera) {
-                setIsCameraLoading(true);
-            } else {
-                cameraReadyRetryCountRef.current = 0;
-                setIsCameraLoading(false);
-                setTorchEnabled(false);
-            }
-        });
-
-        return task.cancel;
-    }, [cameraSessionKey, shouldMountCamera]);
 
     useEffect(() => {
         if (!shouldMountCamera || !isCameraLoading) return;
 
         const timer = setTimeout(() => {
-            if (cameraReadyRetryCountRef.current >= CAMERA_READY_MAX_RETRIES) {
-                return;
-            }
+            if (cameraReadyReportedRef.current) return;
 
-            cameraReadyRetryCountRef.current += 1;
-            setCameraSessionKey((key) => key + 1);
-        }, CAMERA_READY_RETRY_MS);
+            setIsCameraLoading(false);
+            Alert.alert(
+                "相機啟動逾時",
+                `${usesExpoCamera ? "Expo Camera" : "VisionCamera"} 未在 ${CAMERA_LOADING_TIMEOUT_MS / 1000} 秒內回報預覽已啟動。`,
+            );
+        }, CAMERA_LOADING_TIMEOUT_MS);
 
         return () => clearTimeout(timer);
-    }, [cameraSessionKey, isCameraLoading, shouldMountCamera]);
+    }, [isCameraLoading, shouldMountCamera, usesExpoCamera]);
 
     useEffect(() => {
         resetCameraIdleTimer();
         return clearCameraIdleTimer;
-    }, [resetCameraIdleTimer]);
+    }, [clearCameraIdleTimer, resetCameraIdleTimer]);
 
     // on barcode scanned logic
     useEffect(() => {
@@ -589,65 +534,40 @@ export default function Scanner() {
                 }
             }
         })();
-    }, [selectedYear]);
+    }, [clearCameraIdleTimer, selectedYear]);
 
     const handleVisionCameraError = useCallback((error: Error) => {
         if (visionFallbackShownRef.current) return;
 
         visionFallbackShownRef.current = true;
         console.error("VisionCamera 啟動失敗:", error);
+        setIsCameraReady(false);
         setRuntimeProviderOverride("expo-camera");
-        queueCameraActivation("vision_camera_fallback");
-        Alert.alert(
-            "VisionCamera 無法使用",
-            "已暫時改用 Expo Camera。安裝或更新相機套件後，需要重新建立 App。",
-        );
-    }, [queueCameraActivation]);
-
-    const resolvePreferredBackLens = useCallback((lenses: string[]) => {
-        console.log("Available Lenses: ", lenses)
-        if (!lenses.length) return undefined;
-        if (lenses.length === 1) return lenses[0];
-
-        const exactBackCamera = lenses.find((lens) => lens === "Back Camera");
-        if (exactBackCamera) return exactBackCamera;
-
-        const normalized = lenses.map((lens) => ({
-            original: lens,
-            lower: lens.toLowerCase(),
-        }));
-
-        const isUltraWide = (name: string) =>
-            name.includes("ultra") || name.includes("0.5") || name.includes("超廣角");
-
-        const isTelephoto = (name: string) =>
-            name.includes("tele") || name.includes("長焦") || name.includes("望遠") || name.includes("2x") || name.includes("3x") || name.includes("5x");
-
-        const preferred = normalized.find(({lower, original}) => {
-            return !isUltraWide(lower) && !isUltraWide(original) && !isTelephoto(lower) && !isTelephoto(original);
-        });
-
-        return preferred?.original;
-    }, []);
-
-    const handleAvailableLensesChanged = useCallback((lenses: string[]) => {
-        const preferredLens = resolvePreferredBackLens(lenses);
-        setAutoSelectedLens(preferredLens);
-    }, [resolvePreferredBackLens]);
+        activateCamera();
+        showCameraErrorAlert("VisionCamera 無法使用，已改用 Expo Camera", error);
+    }, [activateCamera]);
 
     const handleCameraReady = useCallback(() => {
-        cameraReadyRetryCountRef.current = 0;
+        cameraReadyReportedRef.current = true;
+        clearCameraRevealTimer();
+        cameraRevealTimerRef.current = setTimeout(() => {
+            cameraRevealTimerRef.current = null;
+            setIsCameraReady(true);
+            setIsCameraLoading(false);
+        }, CAMERA_REVEAL_DELAY_MS);
+    }, [clearCameraRevealTimer]);
+
+    const handleExpoCameraError = useCallback((error: Error) => {
+        console.error("Expo Camera 啟動失敗:", error);
+        clearCameraRevealTimer();
+        cameraReadyReportedRef.current = false;
+        setIsCameraReady(false);
         setIsCameraLoading(false);
-    }, []);
+        if (expoCameraErrorShownRef.current) return;
 
-    useEffect(() => {
-        if (!permission || permission.granted) return;
-
-        const logKey = `${permission.status}:${permission.canAskAgain}`;
-        if (permissionMissingLogKeyRef.current === logKey) return;
-
-        permissionMissingLogKeyRef.current = logKey;
-    }, [permission]);
+        expoCameraErrorShownRef.current = true;
+        showCameraErrorAlert("Expo Camera 無法啟動", error);
+    }, [clearCameraRevealTimer]);
 
     const searchButton = useMemo(() => (
         <Button bg="orange400" m="lg" rounded={15} block={true} fontSize="xl" fontWeight="bold" textAlignVertical="bottom"
@@ -711,7 +631,6 @@ export default function Scanner() {
     }
 
     if (!!permission && !permission.granted) {
-        console.log("Permission", permission);
         // Camera permissions are not granted yet.
         return (
             <View style={[styles.container, {marginTop: insets.top}]}>
@@ -747,17 +666,14 @@ export default function Scanner() {
                     usesExpoCamera ? (
                         <ScannerCamera
                             barcodeTypes={expoCameraBarcodeTypes}
-                            sessionKey={cameraSessionKey}
-                            selectedLens={autoSelectedLens}
                             zoom={activeZoomPreset.expoZoom}
                             enableTorch={torchEnabled}
-                            onAvailableLensesChanged={handleAvailableLensesChanged}
                             onBarcodeScanned={navigate}
+                            onError={handleExpoCameraError}
                             onReady={handleCameraReady}
                         />
                     ) : (
                         <VisionCameraScannerSlot
-                            key={cameraSessionKey}
                             active
                             barcodeFormats={visionCameraBarcodeFormats}
                             enableTorch={torchEnabled}
@@ -795,7 +711,7 @@ export default function Scanner() {
                     <TouchableOpacity
                         style={styles.cameraSleepOverlay}
                         activeOpacity={0.85}
-                        onPress={() => activateCamera("sleep_overlay_pressed")}
+                        onPress={activateCamera}
                     >
                         <Icon name="camera-off" color="white" fontSize={36} fontFamily="Feather" />
                         <Text mt="md" color="white" fontSize="lg" fontWeight="bold">
@@ -807,14 +723,16 @@ export default function Scanner() {
                     </TouchableOpacity>
                 )}
             </View>
-            <View style={styles.scannerControlPanel}>
+            <View
+                pointerEvents={isCameraReady ? "auto" : "none"}
+                style={[styles.scannerControlPanel, !isCameraReady && styles.scannerControlPanelDisabled]}
+            >
                 <TouchableOpacity
                     activeOpacity={0.82}
-                    disabled={!shouldMountCamera}
+                    disabled={!isCameraReady}
                     style={[
                         styles.torchButton,
                         torchEnabled && styles.torchButtonActive,
-                        !shouldMountCamera && styles.scannerControlDisabled,
                     ]}
                     onPress={() => setTorchEnabled((enabled) => !enabled)}
                 >
@@ -837,7 +755,11 @@ export default function Scanner() {
                             <TouchableOpacity
                                 key={preset.id}
                                 activeOpacity={0.82}
-                                style={[styles.zoomPresetChip, selected && styles.zoomPresetChipSelected]}
+                                disabled={!isCameraReady}
+                                style={[
+                                    styles.zoomPresetChip,
+                                    selected && styles.zoomPresetChipSelected,
+                                ]}
                                 onPress={() => setScannerZoomPreset(preset.id)}
                             >
                                 <Text fontSize="sm" fontWeight="bold" color={selected ? "white" : "gray800"}>
@@ -1035,6 +957,9 @@ const styles = StyleSheet.create({
         borderRadius: 16,
         backgroundColor: "#F3F4F6",
     },
+    scannerControlPanelDisabled: {
+        opacity: 0.55,
+    },
     torchButton: {
         minHeight: 42,
         flexDirection: "row",
@@ -1048,9 +973,6 @@ const styles = StyleSheet.create({
     torchButtonActive: {
         borderColor: "#FBBF24",
         backgroundColor: "#FEF3C7",
-    },
-    scannerControlDisabled: {
-        opacity: 0.45,
     },
     zoomPresetRow: {
         flexDirection: "row",

@@ -7,11 +7,9 @@ import {
     LayoutAnimation,
     Linking,
     Modal,
-    Platform,
     ScrollView,
     StyleSheet,
     TouchableOpacity,
-    UIManager,
     View
 } from "react-native";
 import {type Href, router} from "expo-router";
@@ -76,10 +74,6 @@ const GITHUB_REPO_URL = "https://github.com/yzu1103309/asset-management-app";
 const CONTACT_EMAIL = "yzu1103309@gmail.com";
 const CURRENT_APP_VERSION = require("@/app.json").expo.version as string;
 const LOCAL_VERSION_RECORD_ENTRIES = getDisplayVersionEntries(LOCAL_VERSION_RECORD, CURRENT_APP_VERSION);
-
-if (Platform.OS === "android" && UIManager.setLayoutAnimationEnabledExperimental) {
-    UIManager.setLayoutAnimationEnabledExperimental(true);
-}
 
 async function fetchVersionRecordEntriesFromUrl(url: string): Promise<VersionRecordEntry[]> {
     const controller = new AbortController();

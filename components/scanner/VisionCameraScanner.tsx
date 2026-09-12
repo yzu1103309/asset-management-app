@@ -1,11 +1,13 @@
-import {memo, useCallback, useEffect, useMemo} from "react";
+import {memo, useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {StyleSheet, View} from "react-native";
-import {Camera, useCameraDevice} from "react-native-vision-camera";
+import {Camera, useCameraDevice, type CameraRef} from "react-native-vision-camera";
 import {
     useBarcodeScannerOutput,
     type Barcode,
     type TargetBarcodeFormat,
 } from "react-native-vision-camera-barcode-scanner";
+
+const CAMERA_DEVICE_DISCOVERY_TIMEOUT_MS = 8 * 1000;
 
 type VisionCameraScannerProps = {
     active: boolean;
@@ -26,6 +28,13 @@ const VisionCameraScanner = memo(function VisionCameraScanner({
     onError,
     onReady,
 }: VisionCameraScannerProps) {
+    const [isPreviewStarted, setIsPreviewStarted] = useState(false);
+    const cameraRef = useRef<CameraRef>(null);
+    const zoomOperationRef = useRef<Promise<void>>(Promise.resolve());
+    const torchOperationRef = useRef<Promise<void>>(Promise.resolve());
+    const requestedZoomRef = useRef(1);
+    const requestedTorchRef = useRef<"off" | "on">("off");
+    const readyReportedRef = useRef(false);
     const device = useCameraDevice("back", {physicalDevices: ["wide-angle"]});
     const handleBarcodes = useCallback((barcodes: Barcode[]) => {
         const value = barcodes
@@ -43,31 +52,88 @@ const VisionCameraScanner = memo(function VisionCameraScanner({
     const effectiveZoom = device
         ? Math.min(device.maxZoom, Math.max(device.minZoom, zoom))
         : zoom;
+    const handlePreviewStarted = useCallback(() => {
+        setIsPreviewStarted(true);
+    }, []);
+    const reportReady = useCallback(() => {
+        if (readyReportedRef.current) return;
+
+        readyReportedRef.current = true;
+        onReady();
+    }, [onReady]);
 
     useEffect(() => {
         if (device || !active) return;
 
         const timeout = setTimeout(() => {
             onError(new Error("VisionCamera 找不到可用的後置相機。"));
-        }, 1200);
+        }, CAMERA_DEVICE_DISCOVERY_TIMEOUT_MS);
         return () => clearTimeout(timeout);
     }, [active, device, onError]);
+
+    useEffect(() => {
+        if (!active || !isPreviewStarted) return;
+        if (requestedZoomRef.current === effectiveZoom) {
+            reportReady();
+            return;
+        }
+
+        requestedZoomRef.current = effectiveZoom;
+        let effectActive = true;
+        const operation = zoomOperationRef.current.then(async () => {
+            if (!effectActive) return;
+            const controller = cameraRef.current?.controller;
+            if (!controller) throw new Error("VisionCamera 控制器尚未就緒。");
+
+            await controller.setZoom(effectiveZoom);
+            if (effectActive) reportReady();
+        });
+        zoomOperationRef.current = operation.catch((error: unknown) => {
+            if (effectActive) onError(error instanceof Error ? error : new Error(String(error)));
+        });
+
+        return () => {
+            effectActive = false;
+        };
+    }, [active, effectiveZoom, isPreviewStarted, onError, reportReady]);
+
+    useEffect(() => {
+        if (!active || !isPreviewStarted || !readyReportedRef.current || !device?.hasTorch) return;
+
+        const nextTorchMode = enableTorch ? "on" : "off";
+        if (requestedTorchRef.current === nextTorchMode) return;
+
+        requestedTorchRef.current = nextTorchMode;
+        let effectActive = true;
+        const operation = torchOperationRef.current.then(async () => {
+            if (!effectActive) return;
+            const controller = cameraRef.current?.controller;
+            if (!controller) throw new Error("VisionCamera 控制器尚未就緒。");
+
+            await controller.setTorchMode(nextTorchMode);
+        });
+        torchOperationRef.current = operation.catch((error: unknown) => {
+            if (effectActive) onError(error instanceof Error ? error : new Error(String(error)));
+        });
+
+        return () => {
+            effectActive = false;
+        };
+    }, [active, device?.hasTorch, enableTorch, isPreviewStarted, onError]);
 
     if (!device) return <View style={styles.placeholder} />;
 
     return (
         <Camera
+            ref={cameraRef}
             style={styles.camera}
             device={device}
             isActive={active}
             outputs={outputs}
-            zoom={effectiveZoom}
-            torchMode={device.hasTorch ? (enableTorch ? "on" : "off") : undefined}
             enableDistortionCorrection={false}
-            enableLowLightBoost={device.supportsLowLightBoost}
             enableNativeTapToFocusGesture
             resizeMode="cover"
-            onPreviewStarted={onReady}
+            onPreviewStarted={handlePreviewStarted}
             onError={onError}
         />
     );
