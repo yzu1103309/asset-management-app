@@ -529,7 +529,7 @@ export default function Scanner() {
             setIsCameraLoading(false);
             Alert.alert(
                 "相機啟動逾時",
-                `${usesExpoCamera ? "Expo Camera" : "VisionCamera"} 未在 ${CAMERA_LOADING_TIMEOUT_MS / 1000} 秒內回報預覽已啟動。`,
+                `${usesExpoCamera ? "Expo Camera" : "Vision Camera"} 未在 ${CAMERA_LOADING_TIMEOUT_MS / 1000} 秒內回報預覽已啟動。`,
             );
         }, CAMERA_LOADING_TIMEOUT_MS);
 
@@ -622,11 +622,11 @@ export default function Scanner() {
         if (visionFallbackShownRef.current) return;
 
         visionFallbackShownRef.current = true;
-        console.error("VisionCamera 啟動失敗:", error);
+        console.error("Vision Camera 啟動失敗:", error);
         setIsCameraReady(false);
         setRuntimeProviderOverride("expo-camera");
         activateCamera();
-        showCameraErrorAlert("VisionCamera 無法使用，已改用 Expo Camera", error);
+        showCameraErrorAlert("Vision Camera 無法使用，已改用 Expo Camera", error);
     }, [activateCamera]);
 
     const handleCameraReady = useCallback(() => {

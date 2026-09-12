@@ -1,6 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
-    getPropertyItemNumberForYear,
+    getPropertyItemDisplayNumber,
+    getPropertyItemDisplayName,
     getPropertyItemYears,
     parseStoredPropertyItems,
     PROPERTY_ITEMS_STORAGE_KEY,
@@ -60,7 +61,8 @@ export async function getAnnualPropertyItems(year: string, status: PropertyStatu
 
         return [{
             ...item,
-            itemNumber: getPropertyItemNumberForYear(item, year),
+            itemNumber: getPropertyItemDisplayNumber(item, year),
+            propertyName: getPropertyItemDisplayName(item),
             status,
             entityIndex: parsedEntry.entityIndex,
         }];

@@ -30,11 +30,18 @@ import {getPropertyItemsByBarcodeMatch} from "@/handlers/propertyList";
 import type {PropertyItem} from "@/handlers/propertyImport";
 import {
     getPropertyEntityKey,
+    getPropertyItemDisplayName,
+    getPropertyItemDisplayNumber,
     getPropertyItemNumberForYear,
     parsePropertyEntityKey,
     type PropertyItemsByBarcode,
     type PropertyPhoto,
 } from "@/handlers/propertyItemStore";
+import {
+    cancelPropertyItemSplit,
+    setPropertyItemSplitEntities,
+    type PropertySplitEntityInput,
+} from "@/handlers/propertyItemSplits";
 import {
     getAreaShapeFromStyle,
     getStoredAreaLayout,
@@ -58,9 +65,9 @@ import {
 } from "@/handlers/updatePropertyItemDetails";
 import {useSafeAreaActionSheet} from "@/hooks/useSafeAreaActionSheet";
 import {
-    addPropertyLabelBarcode,
-    isBarcodeInPropertyLabelQueue,
-    removePropertyLabelBarcode,
+    addPropertyLabelEntity,
+    isPropertyEntityInPropertyLabelQueue,
+    removePropertyLabelEntity,
 } from "@/handlers/propertyLabelQueue";
 import {
     addPropertyItemPhoto,
@@ -127,7 +134,7 @@ const PROPERTY_STATUS_LABELS: Record<PropertyStatus, string> = {
 function getPropertyRelationshipShortLabel(target: PropertyRelationshipTarget | null, fallbackKey?: string | null): string {
     if (!target) return fallbackKey ? `找不到資料：${fallbackKey}` : "（未設定）";
 
-    return `${target.item.propertyName}\n（${target.barcode}）`;
+    return `${getPropertyItemDisplayName(target.item)}\n（${target.barcode}）`;
 }
 
 function propertyRelationshipExistsInYear(target: PropertyRelationshipTarget | null, year: string | null): boolean {
@@ -990,28 +997,40 @@ function DetailEntityMenu({
     total,
     options,
     onSelect,
+    onManageSplit,
+    isSplit,
 }: {
     index: number;
     total: number;
     options: DetailEntityMenuOption[];
     onSelect: (index: number) => void;
+    onManageSplit: () => void;
+    isSplit: boolean;
 }) {
     const actions = useMemo<MenuAction[]>(() => (
-        options.map((option, optionIndex) => ({
+        [...options.map((option, optionIndex) => ({
             id: option.id,
             title: option.title,
             titleColor: "#2563EB",
-            state: optionIndex === index ? "on" : undefined,
-        }))
-    ), [index, options]);
+            state: optionIndex === index ? "on" as const : undefined,
+        })), {
+            id: "manage-split",
+            title: isSplit ? "調整拆分實體" : "拆分為更多實體",
+            titleColor: "#2563EB",
+            image: "square.split.2x1" as const,
+            imageColor: "#2563EB",
+        }]
+    ), [index, isSplit, options]);
     const handlePressAction = useCallback((event: NativeActionEvent) => {
+        if (event.nativeEvent.event === "manage-split") {
+            onManageSplit();
+            return;
+        }
         const nextIndex = Number(event.nativeEvent.event);
         if (!Number.isInteger(nextIndex)) return;
 
         onSelect(nextIndex);
-    }, [onSelect]);
-
-    if (total <= 1) return null;
+    }, [onManageSplit, onSelect]);
 
     return (
         <View style={styles.detailEntityMenuHost}>
@@ -1024,6 +1043,186 @@ function DetailEntityMenu({
                 </View>
             </MenuView>
         </View>
+    );
+}
+
+function PropertySplitModal({
+    item,
+    baseItemNumber,
+    initialEntities,
+    otherBarcodeEntities,
+    saving,
+    onClose,
+    onSave,
+    onCancelSplit,
+}: {
+    item: PropertyItem | null;
+    baseItemNumber: string;
+    initialEntities: PropertySplitEntityInput[];
+    otherBarcodeEntities: Array<{itemNumber: string; propertyName: string}>;
+    saving: boolean;
+    onClose: () => void;
+    onSave: (entities: PropertySplitEntityInput[]) => void;
+    onCancelSplit: () => void;
+}) {
+    const isAlreadySplit = !!item?.split;
+    const [entities, setEntities] = useState(() => initialEntities.map((entity) => ({
+        ...entity,
+        isExisting: isAlreadySplit,
+    })));
+    const initialExistingEntityCount = initialEntities.filter((entity) => entity.existingPart !== undefined).length;
+
+    const save = () => {
+        if (entities.some((entity) => !entity.name.trim())) {
+            Alert.alert("請填寫名稱", "每個拆分實體都必須填寫名稱。");
+            return;
+        }
+        const hasAddedEntity = entities.some((entity) => !entity.isExisting);
+        const hasDeletedEntity = entities.filter((entity) => entity.isExisting).length < initialExistingEntityCount;
+        const saveEntities = () => onSave(entities.map(({name, existingPart}) => ({
+            name,
+            ...(existingPart ? {existingPart} : {}),
+        })));
+
+        if (isAlreadySplit && !hasAddedEntity && !hasDeletedEntity) {
+            onClose();
+            return;
+        }
+
+        if (hasAddedEntity) {
+            Alert.alert(
+                "確認拆分名稱",
+                "儲存後名稱無法更改；如果要更改名稱，必須重新拆分。是否確定名稱正確？",
+                [
+                    {text: "返回", style: "cancel"},
+                    {text: "確認儲存", onPress: saveEntities},
+                ],
+            );
+            return;
+        }
+
+        Alert.alert("確認儲存變更", "確定要儲存刪除實體的變更？", [
+            {text: "返回", style: "cancel"},
+            {text: "確認儲存", style: "destructive", onPress: saveEntities},
+        ]);
+    };
+
+    const addEntity = () => {
+        if (entities.length >= 20) {
+            Alert.alert("已達上限", "最多可拆分為 20 個實體。");
+            return;
+        }
+        setEntities((current) => [...current, {name: "", isExisting: false}]);
+    };
+
+    const removeEntity = (index: number) => {
+        if (entities.length <= 2) {
+            Alert.alert("至少需要兩個實體", "若要回復為單一實體，請使用取消拆分。 ");
+            return;
+        }
+        const remove = () => setEntities((current) => current.filter((_, entityIndex) => entityIndex !== index));
+        if (!entities[index].isExisting) {
+            remove();
+            return;
+        }
+        Alert.alert("刪除實體？", "此實體的現場資料、照片與盤點狀態會一併移除。", [
+            {text: "取消", style: "cancel"},
+            {text: "刪除", style: "destructive", onPress: remove},
+        ]);
+    };
+
+    return (
+        <Modal visible={item !== null} transparent animationType="fade" onRequestClose={onClose}>
+            <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.modalOverlay}>
+                <View style={[styles.modalInnerContainer, styles.splitModalContainer]}>
+                    <View style={styles.modalHeaderRow}>
+                        <Text fontSize="xl" color="gray800" fontWeight="bold" style={styles.modalHeaderTitle}>
+                            {isAlreadySplit ? "調整拆分實體" : "拆分為更多實體"}
+                        </Text>
+                        <TouchableOpacity onPress={onClose} disabled={saving} hitSlop={hitSlop}>
+                            <Icon name="close" color="gray700" fontSize="2xl" fontFamily="AntDesign" />
+                        </TouchableOpacity>
+                    </View>
+                    <Text mt="md" color="gray600" fontSize="md">
+                        每個實體會分開保存位置、備註、照片及各年度盤點狀態；之後匯入同一筆盤點資料時，拆分方式會保留。
+                    </Text>
+                    <ScrollView style={styles.splitEntityList} keyboardShouldPersistTaps="handled">
+                        {entities.map((entity, index) => (
+                            <View key={`${index}:${entities.length}`} style={styles.splitEntityRow}>
+                                <View style={styles.splitEntityNumber}>
+                                    <Text color="#1D4ED8" fontWeight="bold" fontSize="sm">
+                                        {baseItemNumber || "項次"}-{index + 1}
+                                    </Text>
+                                </View>
+                                {entity.isExisting ? (
+                                    <View style={styles.splitEntityExistingName}>
+                                        <Text color="gray800" fontSize="md" numberOfLines={2}>{entity.name}</Text>
+                                    </View>
+                                ) : (
+                                    <Input
+                                        value={entity.name}
+                                        onChangeText={(name) => setEntities((current) => current.map((currentEntity, entityIndex) => (
+                                            entityIndex === index ? {...currentEntity, name} : currentEntity
+                                        )))}
+                                        hitSlop={10}
+                                        editable={!saving}
+                                        flex={1}
+                                        minW={0}
+                                        px="sm"
+                                        h={44}
+                                        rounded={9}
+                                        borderColor="gray300"
+                                        fontSize="md"
+                                        placeholder="請輸入實體名稱"
+                                    />
+                                )}
+                                <TouchableOpacity
+                                    disabled={saving}
+                                    onPress={() => removeEntity(index)}
+                                    style={[styles.splitEntityDeleteButton, saving && styles.addPhotoButtonDisabled]}
+                                    hitSlop={hitSlop}
+                                >
+                                    <Icon name="trash-2" fontFamily="Feather" color="#DC2626" fontSize="lg" />
+                                </TouchableOpacity>
+                            </View>
+                        ))}
+                        <Button
+                            block mt="xs" bg="#EFF6FF" color="#1D4ED8" borderWidth={1} borderColor="#93C5FD" borderStyle="dashed"
+                            rounded={12} disabled={saving} onPress={addEntity}
+                            prefix={<Icon color="#1D4ED8" fontSize="md" mr="sm" name="add-box" fontFamily="MaterialIcons"/>}
+                        >
+                            新增更多實體
+                        </Button>
+                        {otherBarcodeEntities.length > 0 && (
+                            <Text mt="sm" mb={6} color="gray500" fontSize="sm">同條碼的其他清單項次</Text>
+                        )}
+                        {otherBarcodeEntities.map((entity) => (
+                            <View key={`${entity.itemNumber}:${entity.propertyName}`} style={[styles.splitEntityRow, styles.splitEntityOtherRow]}>
+                                <View style={styles.splitEntityNumber}>
+                                    <Text color="gray600" fontWeight="bold" fontSize="sm">{entity.itemNumber}</Text>
+                                </View>
+                                <View style={styles.splitEntityExistingName}>
+                                    <Text color="gray700" fontSize="md" numberOfLines={2}>{entity.propertyName}</Text>
+                                </View>
+                            </View>
+                        ))}
+                    </ScrollView>
+                    {isAlreadySplit && (
+                        <TouchableOpacity disabled={saving} onPress={onCancelSplit} style={styles.cancelSplitButton}>
+                            <Text color="#DC2626" fontSize="sm" fontWeight="bold">取消拆分並回復為單一實體</Text>
+                        </TouchableOpacity>
+                    )}
+                    <View style={styles.modalFooterRow}>
+                        <Button flex={1} bg="gray500" mr="sm" rounded={15} fontWeight="bold" disabled={saving} onPress={onClose}>
+                            取消
+                        </Button>
+                        <Button flex={1} ml="sm" bg="#4CAF7D" rounded={15} fontWeight="bold" disabled={saving} onPress={save}>
+                            {saving ? "儲存中..." : "確認"}
+                        </Button>
+                    </View>
+                </View>
+            </KeyboardAvoidingView>
+        </Modal>
     );
 }
 
@@ -1055,11 +1254,11 @@ function RelationshipPickerModal({
         if (!normalizedKeyword) return targets;
 
         return targets.filter((target) => {
-            const itemNumber = getPropertyItemNumberForYear(target.item, year);
+            const itemNumber = getPropertyItemDisplayNumber(target.item, year);
             return [
                 target.barcode,
                 itemNumber,
-                target.item.propertyName,
+                getPropertyItemDisplayName(target.item),
                 target.item.custodianName ?? "",
             ].some((value) => value.toLowerCase().includes(normalizedKeyword));
         });
@@ -1114,7 +1313,7 @@ function RelationshipPickerModal({
                                         {target.barcode}
                                     </Text>
                                     <Text mt={3} color="gray600" fontSize="sm" numberOfLines={1}>
-                                        {target.item.propertyName}
+                                        {getPropertyItemDisplayName(target.item)}
                                     </Text>
                                 </View>
                                 <Icon name="chevron-right" fontFamily="Feather" color="gray500" fontSize="xl" />
@@ -1158,7 +1357,7 @@ function RelationshipItemCard({
     const barcodeText = target
         ? `${target.barcode}${yearStatusLabel ? `（${yearStatusLabel}）` : ""}`
         : fallbackKey ?? "找不到財產資料";
-    const propertyNameText = target?.item.propertyName ?? "此關係指向的財產資料不存在";
+    const propertyNameText = target ? getPropertyItemDisplayName(target.item) : "此關係指向的財產資料不存在";
 
     return (
         <Pressable onPress={onPress}>
@@ -1358,6 +1557,7 @@ function PropertyDetailBlock({
     statusTitle = "目前狀態",
     entityOptions = [],
     onSelectEntity,
+    onManageSplit,
 }: {
     item: PropertyItem;
     index: number;
@@ -1390,6 +1590,7 @@ function PropertyDetailBlock({
     statusTitle?: string;
     entityOptions?: DetailEntityMenuOption[];
     onSelectEntity?: (index: number) => void;
+    onManageSplit: () => void;
 }) {
     const {width: windowWidth} = useWindowDimensions();
     const statusColors = PROPERTY_STATUS_COLORS[status];
@@ -1420,12 +1621,14 @@ function PropertyDetailBlock({
             <View
                 style={[styles.summaryCard, {backgroundColor: statusColors.cardBg}]}
             >
-                {total > 1 && onSelectEntity && (
+                {onSelectEntity && (
                     <DetailEntityMenu
                         index={index}
                         total={total}
                         options={entityOptions}
                         onSelect={onSelectEntity}
+                        onManageSplit={onManageSplit}
+                        isSplit={!!item.split}
                     />
                 )}
                 <Text textAlign="center" color={statusColors.barcodeColor} fontWeight="bold" fontSize="2xl">{item.propertyName}</Text>
@@ -1584,7 +1787,7 @@ function EntitySelectionStep({
                         </View>
                         <View style={styles.entityChoiceText}>
                             <Text color={statusColors.barcodeColor} fontWeight="bold" fontSize="lg" numberOfLines={1}>
-                                {item.propertyName}
+                                {getPropertyItemDisplayName(item)}
                             </Text>
                             <Text mt={4} color={statusColors.nameColor} fontSize="md" numberOfLines={1}>
                                 清單項次：{item.itemNumber}
@@ -1618,7 +1821,7 @@ export default function Details() {
     const [propertyStatus, setPropertyStatus] = useState<PropertyStatus>("unknown");
     const [entityStatuses, setEntityStatuses] = useState<PropertyStatus[]>([]);
     const [viewingYear, setViewingYear] = useState<string | null>(null);
-    const [selectedEntityIndex, setSelectedEntityIndex] = useState<number | null>(null);
+    const [selectedEntityIndex, setSelectedEntityIndex] = useState<number | null>(() => requestedEntityIndex);
     const [editingLockedFields, setEditingLockedFields] = useState(false);
     const [draftLocationArea, setDraftLocationArea] = useState<{id: string; name: string} | null>(null);
     const [editingTarget, setEditingTarget] = useState<EditingTarget | null>(null);
@@ -1634,8 +1837,11 @@ export default function Details() {
     const [addingPhoto, setAddingPhoto] = useState(false);
     const [savingPhotoToLibrary, setSavingPhotoToLibrary] = useState(false);
     const [selectedItemInPropertyLabelQueue, setSelectedItemInPropertyLabelQueue] = useState(false);
+    const [splitModalItem, setSplitModalItem] = useState<{item: PropertyItem; entityIndex: number} | null>(null);
+    const [savingSplit, setSavingSplit] = useState(false);
     const [loading, setLoading] = useState(true);
     const [statusLoading, setStatusLoading] = useState(true);
+    const [resolvedStatusRequestKey, setResolvedStatusRequestKey] = useState<string | null>(null);
     const [locationCompletionMessage, setLocationCompletionMessage] = useState<string | null>(null);
     const [locationCompletionKey, setLocationCompletionKey] = useState(0);
     const [previewingPhoto, setPreviewingPhoto] = useState<{
@@ -1665,7 +1871,8 @@ export default function Details() {
     const visibleItems = useMemo(() => (
         visibleEntityIndexes.map((entityIndex) => ({
             ...items[entityIndex],
-            itemNumber: getPropertyItemNumberForYear(items[entityIndex], viewingYear),
+            itemNumber: getPropertyItemDisplayNumber(items[entityIndex], viewingYear),
+            propertyName: getPropertyItemDisplayName(items[entityIndex]),
         }))
     ), [items, viewingYear, visibleEntityIndexes]);
     const entityMenuOptions = useMemo<DetailEntityMenuOption[]>(() => (
@@ -1683,12 +1890,48 @@ export default function Details() {
     const selectedVisibleEntityIndex = selectedEntityIndex !== null
         ? visibleEntityIndexes.indexOf(selectedEntityIndex)
         : -1;
+    const statusRequestKey = useMemo(() => [
+        barcode ?? "",
+        viewingYear ?? "all-years",
+        selectedEntityIndex ?? "select-entity",
+        items.map((item) => item.sourceYears.join(",")).join("|"),
+    ].join("::"), [barcode, items, selectedEntityIndex, viewingYear]);
     const displayedSelectedItem = selectedItem
         ? {
             ...selectedItem,
-            itemNumber: getPropertyItemNumberForYear(selectedItem, viewingYear),
+            itemNumber: getPropertyItemDisplayNumber(selectedItem, viewingYear),
+            propertyName: getPropertyItemDisplayName(selectedItem),
         }
         : null;
+    const splitModalInitialEntities = useMemo<PropertySplitEntityInput[]>(() => {
+        if (!splitModalItem) return [];
+        if (!splitModalItem.item.split) {
+            return [{name: splitModalItem.item.propertyName}, {name: ""}];
+        }
+        return items
+            .filter((item) => item.split?.groupId === splitModalItem.item.split?.groupId)
+            .sort((a, b) => (a.split?.part ?? 0) - (b.split?.part ?? 0))
+            .map((item) => ({name: getPropertyItemDisplayName(item), existingPart: item.split?.part}));
+    }, [items, splitModalItem]);
+    const splitModalBaseItemNumber = splitModalItem
+        ? getPropertyItemNumberForYear(splitModalItem.item, viewingYear)
+        : "";
+    const splitModalOtherBarcodeEntities = useMemo(() => {
+        if (!splitModalItem) return [];
+        const currentGroupId = splitModalItem.item.split?.groupId;
+
+        return items.flatMap((item, entityIndex) => {
+            const belongsToCurrentItem = currentGroupId
+                ? item.split?.groupId === currentGroupId
+                : entityIndex === splitModalItem.entityIndex;
+            if (belongsToCurrentItem) return [];
+
+            return [{
+                itemNumber: getPropertyItemDisplayNumber(item, viewingYear),
+                propertyName: getPropertyItemDisplayName(item),
+            }];
+        });
+    }, [items, splitModalItem, viewingYear]);
     const isQuickStatusView = !!viewingYear
         && !!activeInspectionYear
         && !isSamePropertyYear(viewingYear, activeInspectionYear);
@@ -1723,7 +1966,8 @@ export default function Details() {
     const statusLocked = propertyStatus !== "unknown";
     const locationEditMode = editingLockedFields;
     const fieldsEditable = !statusLocked || locationEditMode;
-    const pageLoading = loading;
+    // Never render status-dependent details with a prior entity/year's status.
+    const pageLoading = loading || statusLoading || resolvedStatusRequestKey !== statusRequestKey;
     const actionDisabled = pageLoading || statusLoading || !selectedItem || updatingStatus || updatingLocationArea || updatingRelationships;
     const relationshipDisabled = pageLoading || !selectedItem || updatingRelationships || isSummaryOnlyQuickStatusView;
     const showFixedActions = !pageLoading && !!selectedItem;
@@ -1813,12 +2057,19 @@ export default function Details() {
 
     useEffect(() => {
         if (visibleEntityIndexes.length === 0) {
-            setSelectedEntityIndex(null);
+            // Do not clear a route-provided entity before its property bucket loads.
+            if (!loading) setSelectedEntityIndex(null);
             return;
         }
 
         if (visibleEntityIndexes.length === 1) {
             setSelectedEntityIndex(visibleEntityIndexes[0]);
+            return;
+        }
+
+        // A route entityIndex is only the initial fallback. Once a user picks
+        // another entity from the menu, preserve that explicit choice.
+        if (selectedEntityIndex !== null && visibleEntityIndexes.includes(selectedEntityIndex)) {
             return;
         }
 
@@ -1828,7 +2079,7 @@ export default function Details() {
         }
 
         setSelectedEntityIndex(null);
-    }, [requestedEntityIndex, visibleEntityIndexes]);
+    }, [loading, requestedEntityIndex, selectedEntityIndex, visibleEntityIndexes]);
 
     useEffect(() => {
         const routeYear = requestedYear && detailYearOptions.some((year) => isSamePropertyYear(year, requestedYear))
@@ -1860,6 +2111,7 @@ export default function Details() {
                         if (active) {
                             setEntityStatuses([]);
                             setPropertyStatus("unknown");
+                            setResolvedStatusRequestKey(statusRequestKey);
                         }
                         return;
                     }
@@ -1892,6 +2144,7 @@ export default function Details() {
                         setPropertyStatus(selectedEntityIndex !== null
                             ? nextEntityStatuses[selectedEntityIndex] ?? "unknown"
                             : nextEntityStatuses[visibleEntityIndexes[0] ?? 0] ?? "unknown");
+                        setResolvedStatusRequestKey(statusRequestKey);
                     }
                 } finally {
                     if (active) setStatusLoading(false);
@@ -1901,7 +2154,7 @@ export default function Details() {
             return () => {
                 active = false;
             };
-        }, [barcode, itemYears, items, selectedEntityIndex, viewingYear, visibleEntityIndexes]),
+        }, [barcode, itemYears, items, selectedEntityIndex, statusRequestKey, viewingYear, visibleEntityIndexes]),
     );
 
     useEffect(() => {
@@ -1951,7 +2204,8 @@ export default function Details() {
             }
 
             try {
-                const inQueue = await isBarcodeInPropertyLabelQueue(selectedItem.barcode);
+                if (selectedEntityIndex === null) return;
+                const inQueue = await isPropertyEntityInPropertyLabelQueue(selectedItem.barcode, selectedEntityIndex);
                 if (mounted) setSelectedItemInPropertyLabelQueue(inQueue);
             } catch (error) {
                 console.warn("讀取待製作財產標籤清單失敗:", error);
@@ -1962,7 +2216,7 @@ export default function Details() {
         return () => {
             mounted = false;
         };
-    }, [selectedItem?.barcode]);
+    }, [selectedEntityIndex, selectedItem?.barcode]);
 
     const loadTextSuggestions = async (field: PropertyItemEditableTextField) => {
         try {
@@ -1993,6 +2247,71 @@ export default function Details() {
         setDraftLocationArea(null);
         setEditingTarget(null);
         setPreviewingPhoto(null);
+    };
+
+    const openSplitModal = () => {
+        if (!selectedItem || selectedEntityIndex === null) return;
+        if (isSummaryOnlyQuickStatusView) {
+            Alert.alert("目前無法拆分", "正在快速查看其他年度；請切回該財產可盤點的年度後再操作。");
+            return;
+        }
+        setSplitModalItem({item: selectedItem, entityIndex: selectedEntityIndex});
+    };
+
+    const saveSplit = async (entities: PropertySplitEntityInput[]) => {
+        if (!splitModalItem) return;
+        setSavingSplit(true);
+        try {
+            const result = await setPropertyItemSplitEntities(
+                splitModalItem.item.barcode,
+                splitModalItem.entityIndex,
+                entities,
+            );
+            setItems(result.items[splitModalItem.item.barcode] ?? []);
+            setRelationshipItemsByBarcode(result.items);
+            setRelationshipTargets(getRelationshipTargets(result.items));
+            setSelectedEntityIndex(result.selectedEntityIndex);
+            setSplitModalItem(null);
+        } catch (error) {
+            console.error("拆分財產實體失敗:", error);
+            Alert.alert("儲存失敗", error instanceof Error ? error.message : "無法更新拆分實體，請稍後再試。");
+        } finally {
+            setSavingSplit(false);
+        }
+    };
+
+    const confirmCancelSplit = () => {
+        if (!splitModalItem) return;
+        Alert.alert(
+            "取消拆分？",
+            "會保留第一個實體的現場資料；其他實體的照片、位置、備註與盤點狀態將不再保留。",
+            [
+                {text: "返回", style: "cancel"},
+                {
+                    text: "取消拆分",
+                    style: "destructive",
+                    onPress: () => { void (async () => {
+                        setSavingSplit(true);
+                        try {
+                            const result = await cancelPropertyItemSplit(
+                                splitModalItem.item.barcode,
+                                splitModalItem.entityIndex,
+                            );
+                            setItems(result.items[splitModalItem.item.barcode] ?? []);
+                            setRelationshipItemsByBarcode(result.items);
+                            setRelationshipTargets(getRelationshipTargets(result.items));
+                            setSelectedEntityIndex(result.selectedEntityIndex);
+                            setSplitModalItem(null);
+                        } catch (error) {
+                            console.error("取消拆分財產實體失敗:", error);
+                            Alert.alert("取消失敗", error instanceof Error ? error.message : "無法取消拆分，請稍後再試。");
+                        } finally {
+                            setSavingSplit(false);
+                        }
+                    })(); },
+                },
+            ],
+        );
     };
 
     const requestEditMode = (afterConfirmed?: () => void) => {
@@ -2349,11 +2668,11 @@ export default function Details() {
     };
 
     const addSelectedItemToPropertyLabelQueue = async () => {
-        if (!selectedItem) return;
+        if (!selectedItem || selectedEntityIndex === null) return;
 
         setUpdatingPropertyLabelQueue(true);
         try {
-            await addPropertyLabelBarcode(selectedItem.barcode);
+            await addPropertyLabelEntity(selectedItem.barcode, selectedEntityIndex, items.length);
             setSelectedItemInPropertyLabelQueue(true);
             Alert.alert("已加入", "已加入待製作財產標籤清單。");
         } catch (error) {
@@ -2365,11 +2684,11 @@ export default function Details() {
     };
 
     const removeSelectedItemFromPropertyLabelQueue = async () => {
-        if (!selectedItem) return;
+        if (!selectedItem || selectedEntityIndex === null) return;
 
         setUpdatingPropertyLabelQueue(true);
         try {
-            await removePropertyLabelBarcode(selectedItem.barcode);
+            await removePropertyLabelEntity(selectedItem.barcode, selectedEntityIndex, items.length);
             setSelectedItemInPropertyLabelQueue(false);
             Alert.alert("已移除", "已從待製作財產標籤清單移除。");
         } catch (error) {
@@ -2654,7 +2973,7 @@ export default function Details() {
                         <Text textAlign="center" fontSize="xl" color="gray600">⚠️ 查無此條碼的財產資料</Text>
                     </View>
                 )}
-                {!pageLoading && visibleItems.length > 1 && selectedEntityIndex === null && (
+                {!pageLoading && requestedEntityIndex === null && visibleItems.length > 1 && selectedEntityIndex === null && (
                     <EntitySelectionStep
                         items={visibleItems}
                         statuses={visibleEntityStatuses}
@@ -2702,6 +3021,7 @@ export default function Details() {
                             const entityIndex = visibleEntityIndexes[visibleEntityIndex];
                             if (entityIndex !== undefined) selectEntity(entityIndex);
                         }}
+                        onManageSplit={openSplitModal}
                     />
                 )}
             </ScrollView>
@@ -2720,6 +3040,17 @@ export default function Details() {
                 year={viewingYear}
                 onClose={() => setRelationshipPicker(null)}
                 onSelect={handleRelationshipTargetSelect}
+            />
+            <PropertySplitModal
+                key={splitModalItem ? `${splitModalItem.item.barcode}:${splitModalItem.entityIndex}:${splitModalInitialEntities.map((entity) => entity.name).join("|")}` : "closed"}
+                item={splitModalItem?.item ?? null}
+                baseItemNumber={splitModalBaseItemNumber}
+                initialEntities={splitModalInitialEntities}
+                otherBarcodeEntities={splitModalOtherBarcodeEntities}
+                saving={savingSplit}
+                onClose={() => !savingSplit && setSplitModalItem(null)}
+                onSave={(entities) => { void saveSplit(entities); }}
+                onCancelSplit={confirmCancelSplit}
             />
             <PropertyPhotoPreviewModal
                 photo={previewingPhoto?.photo ?? null}
@@ -3492,6 +3823,56 @@ const styles = StyleSheet.create({
     relationshipPickerContainer: {
         height: "76%",
     },
+    splitModalContainer: {
+        maxWidth: 440,
+    },
+    splitEntityList: {
+        maxHeight: 380,
+        marginTop: 14,
+    },
+    splitEntityRow: {
+        minHeight: 54,
+        marginBottom: 8,
+        paddingHorizontal: 8,
+        paddingVertical: 5,
+        borderRadius: 11,
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 8,
+        backgroundColor: "#F8FAFC",
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: "#CBD5E1",
+    },
+    splitEntityOtherRow: {
+        backgroundColor: "#F8FAFC",
+        borderColor: "#E2E8F0",
+        opacity: 0.78,
+    },
+    splitEntityNumber: {
+        minWidth: 15,
+        alignItems: "center",
+        paddingHorizontal: 5
+    },
+    splitEntityExistingName: {
+        flex: 1,
+        minWidth: 0,
+        paddingHorizontal: 5,
+        paddingVertical: 6,
+    },
+    splitEntityDeleteButton: {
+        width: 34,
+        height: 34,
+        alignItems: "center",
+        justifyContent: "center",
+        borderRadius: 9,
+        backgroundColor: "#FEF2F2",
+    },
+    cancelSplitButton: {
+        alignSelf: "center",
+        marginTop: 12,
+        paddingHorizontal: 10,
+        paddingVertical: 5,
+    },
     relationshipPickerList: {
         flex: 1,
         marginTop: 4,
@@ -3585,7 +3966,7 @@ const styles = StyleSheet.create({
         width: "100%",
         flexDirection: "row",
         justifyContent: "space-between",
-        marginTop: 5,
+        marginTop: 10,
         paddingTop: 5,
     },
 });

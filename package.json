@@ -1,7 +1,7 @@
 {
   "name": "asset-management-app",
   "main": "expo-router/entry",
-  "version": "0.1.1.1",
+  "version": "0.1.2.0",
   "scripts": {
     "start": "expo start --go",
     "dev": "expo start",

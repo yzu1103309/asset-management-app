@@ -18,7 +18,7 @@ import {
 } from "@/handlers/scannerSettings";
 
 const PROVIDER_LABELS: Record<ScannerProvider, string> = {
-    "vision-camera": "VisionCamera（建議）",
+    "vision-camera": "Vision Camera（建議）",
     "expo-camera": "Expo Camera",
 };
 

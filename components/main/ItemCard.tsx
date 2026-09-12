@@ -81,12 +81,13 @@ const styles = StyleSheet.create({
         elevation: 4,
     },
     itemNumberBox: {
-        width: 32,
+        minWidth: 32,
         minHeight: 32,
         alignItems: "center",
         justifyContent: "center",
         marginRight: 10,
         borderRadius: 8,
+        paddingHorizontal: 5
     },
     content: {
         flex: 1,

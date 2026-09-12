@@ -21,6 +21,14 @@ export type PropertyPhoto = {
     createdAt: string;
 };
 
+/** Identifies local physical entities that originated from one imported item. */
+export type PropertyItemSplit = {
+    groupId: string;
+    part: number;
+    /** Local name for this physical entity; the imported name remains propertyName. */
+    name?: string;
+};
+
 export type PropertyItem = ParsedPropertyItem & {
     createdAt: string;
     updatedAt: string;
@@ -29,6 +37,7 @@ export type PropertyItem = ParsedPropertyItem & {
     location: PropertyLocation;
     note: string | null;
     photos?: PropertyPhoto[];
+    split?: PropertyItemSplit;
     parentEntityKey?: string | null;
     childEntityKeys?: string[];
 };
@@ -125,6 +134,20 @@ export function getPropertyItemNumberForYear(item: Pick<PropertyItem, "itemNumbe
     return equivalentYearEntry?.[1] ?? item.itemNumber;
 }
 
+export function getPropertyItemDisplayNumber(
+    item: Pick<PropertyItem, "itemNumber" | "itemNumbersByYear" | "split">,
+    year: string | null | undefined,
+): string {
+    const itemNumber = getPropertyItemNumberForYear(item, year);
+    const part = item.split?.part;
+
+    return Number.isInteger(part) && part && part > 0 ? `${itemNumber}-${part}` : itemNumber;
+}
+
+export function getPropertyItemDisplayName(item: Pick<PropertyItem, "propertyName" | "split">): string {
+    return item.split?.name?.trim() || item.propertyName;
+}
+
 function getUpdatedItemNumbersByYear(
     previousItem: PropertyItem | undefined,
     importedItem: ParsedPropertyItem,
@@ -201,28 +224,36 @@ export function mergePropertyItems(
         const previousIndex = findPreviousItemIndex(previousBucket, importedItem, nextBucket.length, usedIndexes, sourceYear);
         const previousItem = previousIndex >= 0 ? previousBucket[previousIndex] : undefined;
 
+        const splitGroup = previousItem?.split?.groupId
+            ? previousBucket.filter((item) => item.split?.groupId === previousItem.split?.groupId)
+            : previousItem ? [previousItem] : [];
+        const splitGroupIndexes = previousItem?.split?.groupId
+            ? previousBucket.flatMap((item, index) => item.split?.groupId === previousItem.split?.groupId ? [index] : [])
+            : previousIndex >= 0 ? [previousIndex] : [];
+
         if (previousItem) {
-            usedIndexes.add(previousIndex);
+            splitGroupIndexes.forEach((index) => usedIndexes.add(index));
             updatedCount += 1;
         } else {
             createdCount += 1;
         }
 
-        nextBucket.push({
-            ...previousItem,
+        const itemsToMerge = splitGroup.length > 0 ? splitGroup : [undefined];
+        nextBucket.push(...itemsToMerge.map((previousSplitItem) => ({
+            ...previousSplitItem,
             ...importedItem,
-            itemNumber: previousItem?.itemNumber ?? importedItem.itemNumber,
-            createdAt: previousItem?.createdAt ?? importedAt,
+            itemNumber: previousSplitItem?.itemNumber ?? importedItem.itemNumber,
+            createdAt: previousSplitItem?.createdAt ?? importedAt,
             updatedAt: importedAt,
-            sourceYears: getUpdatedSourceYears(previousItem, sourceYear),
-            itemNumbersByYear: getUpdatedItemNumbersByYear(previousItem, importedItem, sourceYear),
-            location: previousItem?.location ?? {
+            sourceYears: getUpdatedSourceYears(previousSplitItem, sourceYear),
+            itemNumbersByYear: getUpdatedItemNumbersByYear(previousSplitItem, importedItem, sourceYear),
+            location: previousSplitItem?.location ?? {
                 areaId: null,
                 areaName: null,
                 description: null,
             },
-            note: previousItem?.note ?? null,
-        });
+            note: previousSplitItem?.note ?? null,
+        })));
 
         nextBuckets.set(importedItem.barcode, nextBucket);
         usedPreviousIndexes.set(importedItem.barcode, usedIndexes);

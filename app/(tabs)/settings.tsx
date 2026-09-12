@@ -1453,7 +1453,7 @@ export default function Settings()
                                                 {item.barcode}
                                             </Text>
                                             <Text mt={3} fontSize="sm" color="gray600" numberOfLines={2}>
-                                                {item.itemNumber}｜{item.propertyName}
+                                                {item.propertyName}
                                             </Text>
                                         </View>
                                     </TouchableOpacity>

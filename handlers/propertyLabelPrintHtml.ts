@@ -1,5 +1,7 @@
 import {
-    getPropertyItemNumberForYear,
+    getPropertyItemDisplayName,
+    getPropertyItemDisplayNumber,
+    getPropertyEntityKey,
     getPropertyItemYears,
     type PropertyItem,
     type PropertyItemsByBarcode,
@@ -38,19 +40,21 @@ function compareItemNumber(a: string, b: string): number {
 
 export function getPropertyLabelPrintItems(
     itemsByBarcode: PropertyItemsByBarcode,
-    barcodeFilter?: string[],
+    queueEntryFilter?: string[],
     options: {latestYearOnly?: boolean} = {},
 ): PropertyLabelPrintItem[] {
-    const filterSet = barcodeFilter ? new Set(barcodeFilter) : null;
+    const filterSet = queueEntryFilter ? new Set(queueEntryFilter) : null;
     const latestYear = options.latestYearOnly ? getPropertyItemYears(itemsByBarcode)[0] ?? null : null;
-    const items = Object.values(itemsByBarcode)
-        .flat()
-        .filter((item) => !filterSet || filterSet.has(item.barcode))
-        .filter((item) => !latestYear || itemExistsInPropertyYear(item.sourceYears, latestYear))
-        .map((item) => ({
+    const items = Object.entries(itemsByBarcode)
+        .flatMap(([barcode, items]) => items.map((item, entityIndex) => ({item, barcode, entityIndex})))
+        .filter(({item, barcode, entityIndex}) => !filterSet
+            || filterSet.has(barcode) // Compatibility with pre-entity queue entries.
+            || filterSet.has(getPropertyEntityKey(barcode, entityIndex)))
+        .filter(({item}) => !latestYear || itemExistsInPropertyYear(item.sourceYears, latestYear))
+        .map(({item}) => ({
             barcode: item.barcode,
-            itemNumber: getPropertyItemNumberForYear(item, latestYear),
-            propertyName: item.propertyName,
+            itemNumber: getPropertyItemDisplayNumber(item, latestYear),
+            propertyName: getPropertyItemDisplayName(item),
             custodianName: item.custodianName ?? "",
         }));
 

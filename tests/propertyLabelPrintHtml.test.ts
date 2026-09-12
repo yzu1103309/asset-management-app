@@ -96,6 +96,63 @@ test("filters all property label print items to latest-year entities", () => {
     ]);
 });
 
+test("prints every split entity with its split item number and local name", () => {
+    const items = getPropertyLabelPrintItems({
+        "A-001": [
+            {
+                barcode: "A-001",
+                itemNumber: "32",
+                propertyName: "ASUS 自組電腦含 DELL 螢幕",
+                custodianName: "王小明",
+                createdAt: "2026-08-16T00:00:00.000Z",
+                updatedAt: "2026-08-16T00:00:00.000Z",
+                sourceYears: ["115"],
+                location: {areaId: null, areaName: null, description: null},
+                note: null,
+                split: {groupId: "desktop", part: 1, name: "ASUS 主機"},
+            },
+            {
+                barcode: "A-001",
+                itemNumber: "32",
+                propertyName: "ASUS 自組電腦含 DELL 螢幕",
+                custodianName: "王小明",
+                createdAt: "2026-08-16T00:00:00.000Z",
+                updatedAt: "2026-08-16T00:00:00.000Z",
+                sourceYears: ["115"],
+                location: {areaId: null, areaName: null, description: null},
+                note: null,
+                split: {groupId: "desktop", part: 2, name: "DELL 24 吋螢幕"},
+            },
+        ],
+    }, ["A-001"]);
+
+    assert.deepEqual(items, [
+        {barcode: "A-001", itemNumber: "32-1", propertyName: "ASUS 主機", custodianName: "王小明"},
+        {barcode: "A-001", itemNumber: "32-2", propertyName: "DELL 24 吋螢幕", custodianName: "王小明"},
+    ]);
+});
+
+test("filters queued labels to one selected split entity", () => {
+    const items = getPropertyLabelPrintItems({
+        "A-001": [
+            {
+                barcode: "A-001", itemNumber: "32", propertyName: "組合設備", custodianName: "王小明",
+                createdAt: "2026-08-16T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z", sourceYears: ["115"],
+                location: {areaId: null, areaName: null, description: null}, note: null,
+                split: {groupId: "desktop", part: 1, name: "主機"},
+            },
+            {
+                barcode: "A-001", itemNumber: "32", propertyName: "組合設備", custodianName: "王小明",
+                createdAt: "2026-08-16T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z", sourceYears: ["115"],
+                location: {areaId: null, areaName: null, description: null}, note: null,
+                split: {groupId: "desktop", part: 2, name: "螢幕"},
+            },
+        ],
+    }, ["A-001::entity:1"]);
+
+    assert.deepEqual(items.map((item) => `${item.itemNumber}:${item.propertyName}`), ["32-2:螢幕"]);
+});
+
 test("builds an A4 3 by 9 property label HTML page with QR code SVG", () => {
     const html = buildPropertyLabelPrintHtml(getPropertyLabelPrintItems(storedItems), {
         kaiuFontDataUri: "data:font/truetype;base64,MOCK_KAIU_FONT",

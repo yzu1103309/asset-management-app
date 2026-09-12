@@ -3,6 +3,8 @@ import {readFileSync} from "node:fs";
 import test from "node:test";
 import {
     getPropertyItemNumberForYear,
+    getPropertyItemDisplayName,
+    getPropertyItemDisplayNumber,
     getPropertyItemYears,
     mergePropertyItems,
     parseStoredPropertyItems,
@@ -128,6 +130,70 @@ test("stores item numbers by source year without overwriting previous years", ()
     assert.equal(getPropertyItemNumberForYear(item, "115"), "2");
     assert.equal(getPropertyItemNumberForYear(item, "2026"), "2");
     assert.equal(item.itemNumber, "1");
+});
+
+test("keeps every split entity and its local records when the source item is reimported", () => {
+    const storedItems: PropertyItemsByBarcode = {
+        "A-001": [
+            {
+                itemNumber: "32",
+                barcode: "A-001",
+                propertyName: "自組電腦含螢幕",
+                custodianName: "舊保管人",
+                createdAt: importedAt,
+                updatedAt: importedAt,
+                sourceYears: ["115"],
+                location: {areaId: "host", areaName: "主機區", description: "桌下"},
+                note: "主機",
+                split: {groupId: "desktop", part: 1},
+            },
+            {
+                itemNumber: "32",
+                barcode: "A-001",
+                propertyName: "自組電腦含螢幕",
+                custodianName: "舊保管人",
+                createdAt: importedAt,
+                updatedAt: importedAt,
+                sourceYears: ["115"],
+                location: {areaId: "screen", areaName: "螢幕區", description: "窗邊"},
+                note: "DELL 螢幕",
+                split: {groupId: "desktop", part: 2},
+            },
+        ],
+    };
+
+    const result = mergePropertyItems(storedItems, [{
+        itemNumber: "40",
+        barcode: "A-001",
+        propertyName: "自組電腦含螢幕（ASUS／DELL 24 吋）",
+        custodianName: "新保管人",
+    }], importedAt, "116");
+
+    const items = result.items["A-001"];
+    assert.equal(result.updatedCount, 1);
+    assert.equal(items.length, 2);
+    assert.deepEqual(items.map((item) => item.location.areaName), ["主機區", "螢幕區"]);
+    assert.deepEqual(items.map((item) => item.note), ["主機", "DELL 螢幕"]);
+    assert.deepEqual(items.map((item) => item.custodianName), ["新保管人", "新保管人"]);
+    assert.deepEqual(items.map((item) => getPropertyItemDisplayNumber(item, "116")), ["40-1", "40-2"]);
+    assert.deepEqual(items.map((item) => getPropertyItemDisplayName(item)), ["自組電腦含螢幕（ASUS／DELL 24 吋）", "自組電腦含螢幕（ASUS／DELL 24 吋）"]);
+});
+
+test("uses the saved split name for display without replacing the imported property name", () => {
+    const item = {
+        itemNumber: "32",
+        barcode: "A-001",
+        propertyName: "ASUS 自組電腦含 DELL 螢幕",
+        createdAt: importedAt,
+        updatedAt: importedAt,
+        sourceYears: ["115"],
+        location: {areaId: null, areaName: null, description: null},
+        note: null,
+        split: {groupId: "desktop", part: 2, name: "DELL 24 吋螢幕"},
+    };
+
+    assert.equal(getPropertyItemDisplayName(item), "DELL 24 吋螢幕");
+    assert.equal(item.propertyName, "ASUS 自組電腦含 DELL 螢幕");
 });
 
 test("does not match a new annual duplicate item by another year's item number", () => {

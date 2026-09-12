@@ -72,7 +72,7 @@ const VisionCameraScanner = memo(function VisionCameraScanner({
         if (device || !active) return;
 
         const timeout = setTimeout(() => {
-            onError(new Error("VisionCamera 找不到可用的後置相機。"));
+            onError(new Error("Vision Camera 找不到可用的後置相機。"));
         }, CAMERA_DEVICE_DISCOVERY_TIMEOUT_MS);
         return () => clearTimeout(timeout);
     }, [active, device, onError]);
@@ -89,7 +89,7 @@ const VisionCameraScanner = memo(function VisionCameraScanner({
         const operation = zoomOperationRef.current.then(async () => {
             if (!effectActive) return;
             const controller = cameraRef.current?.controller;
-            if (!controller) throw new Error("VisionCamera 控制器尚未就緒。");
+            if (!controller) throw new Error("Vision Camera 控制器尚未就緒。");
 
             const sessionZoom = Math.min(
                 controller.maxZoom,
@@ -118,7 +118,7 @@ const VisionCameraScanner = memo(function VisionCameraScanner({
         const operation = torchOperationRef.current.then(async () => {
             if (!effectActive) return;
             const controller = cameraRef.current?.controller;
-            if (!controller) throw new Error("VisionCamera 控制器尚未就緒。");
+            if (!controller) throw new Error("Vision Camera 控制器尚未就緒。");
 
             await controller.setTorchMode(nextTorchMode);
         });
