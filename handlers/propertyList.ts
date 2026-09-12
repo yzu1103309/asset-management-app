@@ -13,6 +13,7 @@ import {
     parsePropertyStatusEntryKey,
     type PropertyStatus,
 } from "./propertyStatusStore.ts";
+import {findPropertyBarcodeLookupMatch} from "./propertyBarcode.ts";
 
 export type AnnualPropertyListItem = PropertyItem & {
     status: PropertyStatus;
@@ -68,5 +69,12 @@ export async function getAnnualPropertyItems(year: string, status: PropertyStatu
 
 export async function getPropertyItemsByBarcode(barcode: string): Promise<PropertyItem[]> {
     const itemsByBarcode = parseStoredPropertyItems(await AsyncStorage.getItem(PROPERTY_ITEMS_STORAGE_KEY));
-    return itemsByBarcode[barcode] ?? [];
+    const match = findPropertyBarcodeLookupMatch(itemsByBarcode, barcode);
+    return match ? itemsByBarcode[match.barcode] ?? [] : [];
+}
+
+export async function getPropertyItemsByBarcodeMatch(barcode: string): Promise<{barcode: string; items: PropertyItem[]} | null> {
+    const itemsByBarcode = parseStoredPropertyItems(await AsyncStorage.getItem(PROPERTY_ITEMS_STORAGE_KEY));
+    const match = findPropertyBarcodeLookupMatch(itemsByBarcode, barcode);
+    return match ? {barcode: match.barcode, items: itemsByBarcode[match.barcode] ?? []} : null;
 }

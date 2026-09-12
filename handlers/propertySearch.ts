@@ -1,5 +1,6 @@
 import Fuse, {type IFuseOptions} from "fuse.js";
 import type {AnnualPropertyListItem} from "./propertyList.ts";
+import {normalizeBarcodeCompact, propertyBarcodeMatchesSearchQuery} from "./propertyBarcode.ts";
 
 const SEARCH_OPTIONS: IFuseOptions<AnnualPropertyListItem> = {
     keys: [
@@ -9,14 +10,10 @@ const SEARCH_OPTIONS: IFuseOptions<AnnualPropertyListItem> = {
     threshold: 0.35,
     ignoreLocation: true,
 };
-const BARCODE_FRAGMENT_MIN_DIGITS = 4;
-
-function normalizeBarcode(value: string): string {
-    return value.replace(/[-,，\s]/g, "");
-}
+const BARCODE_FRAGMENT_MIN_DIGITS = 3;
 
 function isBarcodeSearchQuery(value: string): boolean {
-    const normalizedValue = normalizeBarcode(value);
+    const normalizedValue = normalizeBarcodeCompact(value);
     return normalizedValue.length >= BARCODE_FRAGMENT_MIN_DIGITS && /^\d+$/.test(normalizedValue) && /^[\d\s,，-]+$/.test(value);
 }
 
@@ -25,8 +22,7 @@ export function searchPropertyItems(query: string, items: AnnualPropertyListItem
     if (!trimmedQuery) return items;
 
     if (isBarcodeSearchQuery(trimmedQuery)) {
-        const normalizedQuery = normalizeBarcode(trimmedQuery);
-        return items.filter((item) => normalizeBarcode(item.barcode).includes(normalizedQuery));
+        return items.filter((item) => propertyBarcodeMatchesSearchQuery(item.barcode, trimmedQuery));
     }
 
     return new Fuse(items, SEARCH_OPTIONS)

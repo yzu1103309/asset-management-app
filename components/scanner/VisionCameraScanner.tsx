@@ -14,7 +14,7 @@ type VisionCameraScannerProps = {
     barcodeFormats: TargetBarcodeFormat[];
     enableTorch: boolean;
     zoom: number;
-    onBarcodeScanned: (value: string) => void;
+    onBarcodeScanned: (scan: {value: string; format?: string}) => void;
     onError: (error: Error) => void;
     onReady: () => void;
 };
@@ -38,10 +38,14 @@ const VisionCameraScanner = memo(function VisionCameraScanner({
     const readyReportedRef = useRef(false);
     const device = useCameraDevice("back", {physicalDevices: ["wide-angle"]});
     const handleBarcodes = useCallback((barcodes: Barcode[]) => {
-        const value = barcodes
-            .map((barcode) => barcode.rawValue ?? barcode.displayValue)
-            .find((candidate) => typeof candidate === "string" && candidate.length > 0);
-        if (value !== undefined) onBarcodeScanned(value);
+        const scannedBarcode = barcodes.find((barcode) => {
+            const value = barcode.rawValue ?? barcode.displayValue;
+            return typeof value === "string" && value.length > 0;
+        });
+        const value = scannedBarcode?.rawValue ?? scannedBarcode?.displayValue;
+        if (value !== undefined) {
+            onBarcodeScanned({value, format: scannedBarcode?.format});
+        }
     }, [onBarcodeScanned]);
     const barcodeOutput = useBarcodeScannerOutput({
         barcodeFormats,

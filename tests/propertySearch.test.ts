@@ -36,6 +36,22 @@ const items: AnnualPropertyListItem[] = [
         },
         note: null,
     },
+    {
+        itemNumber: "3",
+        barcode: "3140306-03-544",
+        propertyName: "測試顯示卡",
+        status: "unknown",
+        entityIndex: 0,
+        createdAt: "2026-08-14T00:00:00.000Z",
+        updatedAt: "2026-08-14T00:00:00.000Z",
+        sourceYears: ["115"],
+        location: {
+            areaId: null,
+            areaName: null,
+            description: null,
+        },
+        note: null,
+    },
 ];
 
 test("searches property items by barcode", () => {
@@ -56,6 +72,13 @@ test("searches property items by exact barcode fragment without separators", () 
     assert.deepEqual(searchPropertyItems("30001", items).map((item) => item.barcode), ["9988776-03-30001"]);
     assert.deepEqual(searchPropertyItems("760330", items).map((item) => item.barcode), ["9988776-03-30001"]);
     assert.deepEqual(searchPropertyItems("30002", items), []);
+});
+
+test("searches property items by zero-padded barcode tail", () => {
+    assert.deepEqual(searchPropertyItems("544", items).map((item) => item.barcode), ["3140306-03-544"]);
+    assert.deepEqual(searchPropertyItems("00544", items).map((item) => item.barcode), ["3140306-03-544"]);
+    assert.deepEqual(searchPropertyItems("3140306-03-00544", items).map((item) => item.barcode), ["3140306-03-544"]);
+    assert.deepEqual(searchPropertyItems("3140106-03-00544", items).map((item) => item.barcode), ["3140306-03-544"]);
 });
 
 test("searches property items by property name", () => {

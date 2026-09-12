@@ -16,7 +16,7 @@ import {useSafeAreaInsets} from "react-native-safe-area-context";
 import SearchModal from "@/components/SearchModal";
 import PropertyYearDropdown from "@/components/PropertyYearDropdown";
 import {usePropertyYear} from "@/context/PropertyYearContext";
-import {getPropertyItemsByBarcode} from "@/handlers/propertyList";
+import {getPropertyItemsByBarcode, getPropertyItemsByBarcodeMatch} from "@/handlers/propertyList";
 import {
     comparePropertyYearsDescending,
     itemExistsInPropertyYear,
@@ -42,6 +42,7 @@ const Clipboard = require("expo-clipboard") as ClipboardModule;
 const CAMERA_IDLE_TIMEOUT_MS = 60 * 1000;
 const CAMERA_LOADING_TIMEOUT_MS = 10 * 1000;
 const CAMERA_REVEAL_DELAY_MS = 300;
+const SCAN_CONFIRMATION_WINDOW_MS = 1800;
 type ScannerZoomPresetId = "wide" | "standard" | "closer" | "maximum";
 const SCANNER_CAMERA_ZOOM_PRESETS = [
     {id: "wide", label: "較廣", expoZoom: 0.08, visionZoom: 1},
@@ -62,8 +63,43 @@ const absoluteFill = {
     left: 0,
 };
 
+type ScannerBarcodeScan = {
+    value: string;
+    format?: string;
+};
+
+type ScanConfirmationState = {
+    count: number;
+    firstSeenAt: number;
+    lastSeenAt: number;
+};
+
 function getItemSourceYears(items: Awaited<ReturnType<typeof getPropertyItemsByBarcode>>): string[] {
     return [...new Set(items.flatMap((item) => item.sourceYears))].sort(comparePropertyYearsDescending);
+}
+
+function normalizeScannedBarcodeValue(value: string): string {
+    return value.trim();
+}
+
+function isSingleHitBarcodeFormat(format: string | undefined): boolean {
+    return format === "qr"
+        || format === "qr-code"
+        || format === "aztec"
+        || format === "datamatrix"
+        || format === "data-matrix"
+        || format === "pdf417"
+        || format === "pdf-417";
+}
+
+function getScanConfirmationPolicy(provider: ScannerProvider, format: string | undefined): {requiredCount: number; requiredSpanMs: number} {
+    if (isSingleHitBarcodeFormat(format)) {
+        return {requiredCount: 1, requiredSpanMs: 0};
+    }
+
+    return provider === "vision-camera"
+        ? {requiredCount: 3, requiredSpanMs: 220}
+        : {requiredCount: 2, requiredSpanMs: 120};
 }
 
 function showCameraErrorAlert(title: string, error: unknown) {
@@ -100,7 +136,7 @@ type ScannerCameraProps = {
     barcodeTypes: BarcodeType[];
     zoom: number;
     enableTorch: boolean;
-    onBarcodeScanned: (isbn: string) => void;
+    onBarcodeScanned: (scan: ScannerBarcodeScan) => void;
     onError: (error: Error) => void;
     onReady: () => void;
 };
@@ -127,7 +163,10 @@ const ScannerCamera = memo(function ScannerCamera({
                 barcodeTypes,
             }}
             onBarcodeScanned={isReady
-                ? (scanningResult) => onBarcodeScanned(scanningResult.data)
+                ? (scanningResult) => onBarcodeScanned({
+                    value: scanningResult.raw ?? scanningResult.data,
+                    format: scanningResult.type,
+                })
                 : undefined}
             zoom={zoom}
             enableTorch={isReady && enableTorch}
@@ -143,7 +182,7 @@ type VisionCameraScannerProps = {
     barcodeFormats: VisionCameraBarcodeFormat[];
     enableTorch: boolean;
     zoom: number;
-    onBarcodeScanned: (value: string) => void;
+    onBarcodeScanned: (scan: ScannerBarcodeScan) => void;
     onError: (error: Error) => void;
     onReady: () => void;
 };
@@ -195,11 +234,11 @@ export default function Scanner() {
     const [torchEnabled, setTorchEnabled] = useState(false);
     const [modalVisible, setModalVisible] = useState(false);
     const {availableYears, selectedYear, loading: yearsLoading, refreshYears} = usePropertyYear();
-    const [scanned, setScanned] = useState("")
     const reopenSearchOnFocusRef = useRef(false);
     const searchOpenRequestIdRef = useRef(0);
     const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const cameraRevealTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const scanConfirmationRef = useRef<Map<string, ScanConfirmationState>>(new Map());
     const cameraReadyReportedRef = useRef(false);
     const idleAlertVisibleRef = useRef(false);
     const appStateRef = useRef<AppStateStatus>(AppState.currentState);
@@ -237,25 +276,66 @@ export default function Scanner() {
         }
     }, []);
 
+    const resetScanConfirmation = useCallback(() => {
+        scanConfirmationRef.current.clear();
+    }, []);
+
+    const confirmScanCandidate = useCallback((scan: ScannerBarcodeScan): string | null => {
+        const value = normalizeScannedBarcodeValue(scan.value);
+        if (!value) return null;
+
+        const now = Date.now();
+        const confirmation = scanConfirmationRef.current;
+        for (const [candidateValue, state] of confirmation) {
+            if (now - state.lastSeenAt > SCAN_CONFIRMATION_WINDOW_MS) {
+                confirmation.delete(candidateValue);
+            }
+        }
+
+        const previousState = confirmation.get(value);
+        const nextState: ScanConfirmationState = previousState
+            ? {
+                count: previousState.count + 1,
+                firstSeenAt: previousState.firstSeenAt,
+                lastSeenAt: now,
+            }
+            : {
+                count: 1,
+                firstSeenAt: now,
+                lastSeenAt: now,
+            };
+        confirmation.set(value, nextState);
+
+        const policy = getScanConfirmationPolicy(activeProvider, scan.format);
+        if (nextState.count < policy.requiredCount) return null;
+        if (now - nextState.firstSeenAt < policy.requiredSpanMs) return null;
+
+        confirmation.clear();
+        return value;
+    }, [activeProvider]);
+
     const pauseCamera = useCallback(() => {
         clearCameraIdleTimer();
         clearCameraRevealTimer();
+        resetScanConfirmation();
         cameraReadyReportedRef.current = false;
         setIsCameraReady(false);
         setIsCameraActive(false);
         setIsCameraLoading(false);
         setTorchEnabled(false);
-    }, [clearCameraIdleTimer, clearCameraRevealTimer]);
+    }, [clearCameraIdleTimer, clearCameraRevealTimer, resetScanConfirmation]);
 
     const activateCamera = useCallback(() => {
         clearCameraIdleTimer();
         clearCameraRevealTimer();
+        resetScanConfirmation();
         cameraReadyReportedRef.current = false;
         idleAlertVisibleRef.current = false;
         setIsCameraReady(false);
         setIsCameraLoading(true);
+        setTorchEnabled(false);
         setIsCameraActive(true);
-    }, [clearCameraIdleTimer, clearCameraRevealTimer]);
+    }, [clearCameraIdleTimer, clearCameraRevealTimer, resetScanConfirmation]);
 
     const resetCameraIdleTimer = useCallback(() => {
         clearCameraIdleTimer();
@@ -383,7 +463,7 @@ export default function Scanner() {
             } else {
                 activateCamera();
             }
-            setScanned("")
+            resetScanConfirmation();
 
             return () => {
                 focusActive = false;
@@ -397,8 +477,10 @@ export default function Scanner() {
                 setIsCameraReady(false);
                 setIsCameraActive(false);
                 setIsCameraLoading(false);
+                setTorchEnabled(false);
+                resetScanConfirmation();
             };
-        }, [activateCamera, clearCameraIdleTimer, clearCameraRevealTimer, pauseCamera, refreshYears])
+        }, [activateCamera, clearCameraIdleTimer, clearCameraRevealTimer, pauseCamera, refreshYears, resetScanConfirmation])
     );
 
     useEffect(() => {
@@ -459,23 +541,20 @@ export default function Scanner() {
         return clearCameraIdleTimer;
     }, [clearCameraIdleTimer, resetCameraIdleTimer]);
 
-    // on barcode scanned logic
-    useEffect(() => {
-        (async () => {
-            if (scanned)
-            {
-                router.navigate({
-                    pathname: "/stacks/details",
-                    params: selectedYear
-                        ? {barcode: scanned, year: selectedYear}
-                        : {barcode: scanned},
-                });
-            }
-        })()
-    }, [scanned, selectedYear]);
+    const openScannedDetails = useCallback((barcode: string) => {
+        router.navigate({
+            pathname: "/stacks/details",
+            params: selectedYear
+                ? {barcode, year: selectedYear}
+                : {barcode},
+        });
+    }, [selectedYear]);
 
-    const navigate = useCallback((isbn: string) => {
+    const navigate = useCallback((scan: ScannerBarcodeScan) => {
         if (barcodeScanHandlingRef.current) return;
+
+        const isbn = confirmScanCandidate(scan);
+        if (!isbn) return;
 
         barcodeScanHandlingRef.current = true;
         clearCameraIdleTimer();
@@ -484,8 +563,11 @@ export default function Scanner() {
             let shouldReleaseScanner = true;
 
             try {
+                const propertyMatch = await getPropertyItemsByBarcodeMatch(isbn);
+                const navigationBarcode = propertyMatch?.barcode ?? isbn;
+
                 if (selectedYear) {
-                    const scannedItems = await getPropertyItemsByBarcode(isbn);
+                    const scannedItems = propertyMatch?.items ?? [];
                     const sourceYears = getItemSourceYears(scannedItems);
                     const existsInSelectedYear = sourceYears.length === 0
                         || itemExistsInPropertyYear(sourceYears, selectedYear);
@@ -501,7 +583,7 @@ export default function Scanner() {
                         };
 
                         shouldReleaseScanner = false;
-                        setScanned(isbn);
+                        openScannedDetails(navigationBarcode);
                         if (selectedWesternYear !== null && sourceWesternYears.some((year) => year > selectedWesternYear)) {
                             Alert.alert(
                                 "不屬於目前盤點年度",
@@ -522,10 +604,10 @@ export default function Scanner() {
                     }
                 }
 
-                setScanned(isbn);
+                openScannedDetails(navigationBarcode);
             } catch (error) {
                 console.error("檢查掃描財產年度失敗:", error);
-                setScanned(isbn);
+                openScannedDetails(isbn);
             } finally {
                 if (shouldReleaseScanner) {
                     setTimeout(() => {
@@ -534,7 +616,7 @@ export default function Scanner() {
                 }
             }
         })();
-    }, [clearCameraIdleTimer, selectedYear]);
+    }, [clearCameraIdleTimer, confirmScanCandidate, openScannedDetails, selectedYear]);
 
     const handleVisionCameraError = useCallback((error: Error) => {
         if (visionFallbackShownRef.current) return;
@@ -549,13 +631,14 @@ export default function Scanner() {
 
     const handleCameraReady = useCallback(() => {
         cameraReadyReportedRef.current = true;
+        resetScanConfirmation();
         clearCameraRevealTimer();
         cameraRevealTimerRef.current = setTimeout(() => {
             cameraRevealTimerRef.current = null;
             setIsCameraReady(true);
             setIsCameraLoading(false);
         }, CAMERA_REVEAL_DELAY_MS);
-    }, [clearCameraRevealTimer]);
+    }, [clearCameraRevealTimer, resetScanConfirmation]);
 
     const handleExpoCameraError = useCallback((error: Error) => {
         console.error("Expo Camera 啟動失敗:", error);

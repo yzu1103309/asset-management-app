@@ -26,7 +26,7 @@ import {Gesture, GestureDetector, GestureHandlerRootView} from "react-native-ges
 import Reanimated, {useAnimatedStyle, useSharedValue, withSpring} from "react-native-reanimated";
 import {useSafeAreaInsets} from "react-native-safe-area-context";
 import {Button, Div, Icon, Input, Text} from "react-native-magnus";
-import {getPropertyItemsByBarcode} from "@/handlers/propertyList";
+import {getPropertyItemsByBarcodeMatch} from "@/handlers/propertyList";
 import type {PropertyItem} from "@/handlers/propertyImport";
 import {
     getPropertyEntityKey,
@@ -1603,9 +1603,13 @@ export default function Details() {
     const {showActionSheetWithOptions} = useSafeAreaActionSheet();
     const {selectedYear: activeInspectionYear} = usePropertyYear();
     const params = useLocalSearchParams<{barcode?: string; serial?: string; entityIndex?: string; status?: string; year?: string}>();
-    const barcode = useMemo(() => getParamValue(params.barcode) ?? getParamValue(params.serial), [params.barcode, params.serial]);
+    const routeBarcode = useMemo(() => getParamValue(params.barcode) ?? getParamValue(params.serial), [params.barcode, params.serial]);
     const requestedEntityIndex = useMemo(() => parseEntityIndexParam(getParamValue(params.entityIndex)), [params.entityIndex]);
     const requestedYear = useMemo(() => getParamValue(params.year), [params.year]);
+    const [resolvedBarcodeMatch, setResolvedBarcodeMatch] = useState<{request: string; barcode: string} | null>(null);
+    const barcode = resolvedBarcodeMatch && resolvedBarcodeMatch.request === routeBarcode
+        ? resolvedBarcodeMatch.barcode
+        : routeBarcode;
     const [items, setItems] = useState<PropertyItem[]>([]);
     const [areaLayout, setAreaLayout] = useState<AreaLayout | null>(null);
     const [relationshipItemsByBarcode, setRelationshipItemsByBarcode] = useState<PropertyItemsByBarcode>({});
@@ -1753,19 +1757,22 @@ export default function Details() {
         let mounted = true;
 
         void (async () => {
-            if (!barcode) {
+            if (!routeBarcode) {
+                setResolvedBarcodeMatch(null);
                 setItems([]);
                 setLoading(false);
                 return;
             }
 
+            setLoading(true);
             try {
                 const [result, targets] = await Promise.all([
-                    getPropertyItemsByBarcode(barcode),
+                    getPropertyItemsByBarcodeMatch(routeBarcode),
                     getStoredRelationshipItemsByBarcode(),
                 ]);
                 if (mounted) {
-                    setItems(result);
+                    setResolvedBarcodeMatch(result ? {request: routeBarcode, barcode: result.barcode} : null);
+                    setItems(result?.items ?? []);
                     setRelationshipItemsByBarcode(targets);
                     setRelationshipTargets(getRelationshipTargets(targets));
                 }
@@ -1777,7 +1784,7 @@ export default function Details() {
         return () => {
             mounted = false;
         };
-    }, [barcode]);
+    }, [routeBarcode]);
 
     useFocusEffect(
         useCallback(() => {
