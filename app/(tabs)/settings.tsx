@@ -1110,7 +1110,7 @@ export default function Settings()
                     />
                 </Section>
 
-                <Section title="軟體設定">
+                <Section title="設定與實用功能">
                     <MenuRow
                         title="掃描器設定"
                         description="選擇掃描器與可辨識的條碼格式"
@@ -1118,6 +1118,14 @@ export default function Settings()
                         iconFamily="Ionicons"
                         color="blue500"
                         onPress={() => router.push("/stacks/camera_settings" as Href)}
+                    />
+                    <MenuRow
+                        title="備忘錄"
+                        description="記錄盤點相關其他備忘事項"
+                        icon="open-book"
+                        iconFamily="Entypo"
+                        color="yellow600"
+                        onPress={() => router.push("/stacks/memo" as Href)}
                     />
                 </Section>
 

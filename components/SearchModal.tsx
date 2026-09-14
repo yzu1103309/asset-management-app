@@ -146,6 +146,8 @@ export default function SearchModal({visible, onClose, onNavigate}: SearchModalP
             itemNumber={item.itemNumber}
             barcode={item.barcode}
             propertyName={item.propertyName}
+            location={item.location}
+            note={item.note}
             status={item.status}
             onPress={() => navigateToItem(item)}
         />

@@ -16,12 +16,23 @@ type ItemCardProps = {
     itemNumber: string;
     barcode: string;
     propertyName: string;
+    location?: {
+        areaName: string | null;
+        description: string | null;
+    } | null;
+    note?: string | null;
     status: PropertyStatus;
     onPress?: () => void;
 };
 
-const ItemCard = memo(function ItemCard({itemNumber, barcode, propertyName, status, onPress}: ItemCardProps) {
+const ItemCard = memo(function ItemCard({itemNumber, barcode, propertyName, location, note, status, onPress}: ItemCardProps) {
     const statusStyle = PROPERTY_STATUS_COLORS[status];
+    const locationText = [location?.areaName, location?.description]
+        .map((value) => value?.trim())
+        .filter((value): value is string => Boolean(value))
+        .join("／");
+    const noteText = note?.trim();
+    const locationSummary = locationText ? `@ ${locationText}${noteText ? `（${noteText}）` : ""}` : null;
 
     return (
         <Pressable
@@ -49,9 +60,14 @@ const ItemCard = memo(function ItemCard({itemNumber, barcode, propertyName, stat
                         <Text mb={2} fontSize={16} fontWeight="bold" color={statusStyle.barcodeColor} numberOfLines={1}>
                             {barcode}
                         </Text>
-                        <Text mt={2} fontSize={14} color={statusStyle.nameColor} lineHeight={19} numberOfLines={1}>
+                        <Text mt={2} fontSize={14} color={statusStyle.barcodeColor} lineHeight={19} numberOfLines={1}>
                             {propertyName}
                         </Text>
+                        {locationSummary && (
+                            <Text mt={4} fontSize={12} color={statusStyle.nameColor} lineHeight={17} numberOfLines={1}>
+                                {locationSummary}
+                            </Text>
+                        )}
                     </View>
                     {pressed && <View pointerEvents="none" style={styles.pressedOverlay} />}
                 </View>

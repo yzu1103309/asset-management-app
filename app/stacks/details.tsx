@@ -12,6 +12,7 @@ import {
     Pressable,
     ScrollView,
     StyleSheet,
+    TextInput,
     type StyleProp,
     TouchableOpacity,
     useWindowDimensions,
@@ -113,6 +114,7 @@ function getPrimarySourceYear(item: PropertyItem): string | null {
 
 const hitSlop = {top: 10, bottom: 10, left: 10, right: 10};
 const MAX_PROPERTY_PHOTO_COUNT = 3;
+const TEXT_EDITOR_HEIGHT = 120;
 const absoluteFill = {
     position: "absolute" as const,
     top: 0,
@@ -479,7 +481,6 @@ function DetailTextEditModal({
     const [text, setText] = useState("");
     const [isEditing, setIsEditing] = useState(false);
     const limit = target?.field === "note" ? 100 : 100;
-    const inputHeight = Math.min(44 + Math.max(0, text.split("\n").length - 1) * 25, 220);
     const initialText = target?.value ?? "";
     const textChanged = text !== initialText;
     const filteredSuggestions = useMemo(
@@ -522,7 +523,7 @@ function DetailTextEditModal({
     }, [showSuggestions, suggestionsVisibility]);
 
     const handleTextChange = (nextText: string) => {
-        setText(nextText.replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").slice(0, limit));
+        setText(nextText.replace(/\n{1,}/g, "").replace(/[ \t]{2,}/g, " ").slice(0, limit));
     };
     const confirmClearText = () => {
         if (!text.length) return;
@@ -597,24 +598,17 @@ function DetailTextEditModal({
 
                     {isEditing ? (
                         <>
-                            <Input
+                            <TextInput
+                                style={[styles.textEditorInput, {height: TEXT_EDITOR_HEIGHT}]}
                                 value={text}
                                 autoFocus
                                 multiline
-                                numberOfLines={Math.max(1, text.split("\n").length)}
                                 maxLength={limit}
                                 onChangeText={handleTextChange}
                                 placeholder="請輸入內容..."
-                                scrollEnabled={inputHeight >= 220}
-                                h={inputHeight}
-                                px={2}
-                                fontSize="lg"
-                                borderColor="transparent"
-                                rounded={0}
-                                borderBottomColor="gray800"
-                                borderBottomWidth={1}
-                                mx="sm"
-                                mt="md"
+                                placeholderTextColor="#98A2B3"
+                                scrollEnabled
+                                textAlignVertical="top"
                             />
 
                             <Animated.View
@@ -3937,6 +3931,20 @@ const styles = StyleSheet.create({
     modalReadOnlyScroll: {
         maxHeight: 363,
         marginTop: 15,
+    },
+    textEditorInput: {
+        marginTop: 16,
+        marginHorizontal: 8,
+        paddingHorizontal: 14,
+        paddingVertical: 10,
+        borderWidth: 1,
+        borderColor: "#98A2B3",
+        borderRadius: 12,
+        backgroundColor: "#F8FAFC",
+        color: "#1D2939",
+        fontSize: 14,
+        lineHeight: 20,
+        textAlignVertical: "center"
     },
     modalReadOnlyContent: {
         paddingBottom: 8,
