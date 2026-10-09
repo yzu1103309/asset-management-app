@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {searchPropertyItems} from "../handlers/propertySearch.ts";
+import {filterPropertyItemsByTags, searchPropertyItems} from "../handlers/propertySearch.ts";
 import type {AnnualPropertyListItem} from "../handlers/propertyList.ts";
 
 const items: AnnualPropertyListItem[] = [
@@ -18,7 +18,8 @@ const items: AnnualPropertyListItem[] = [
             areaName: null,
             description: null,
         },
-        note: null,
+        note: "借給王老師使用，IP 末碼 80，備註代碼 24680",
+        tags: ["GPU Server", "機房設備"],
     },
     {
         itemNumber: "2",
@@ -34,7 +35,8 @@ const items: AnnualPropertyListItem[] = [
             areaName: null,
             description: null,
         },
-        note: null,
+        note: "IP 80",
+        tags: ["網路設備"],
     },
     {
         itemNumber: "3",
@@ -50,7 +52,7 @@ const items: AnnualPropertyListItem[] = [
             areaName: null,
             description: null,
         },
-        note: null,
+        note: "只有 IP 記錄",
     },
 ];
 
@@ -83,6 +85,40 @@ test("searches property items by zero-padded barcode tail", () => {
 
 test("searches property items by property name", () => {
     assert.deepEqual(searchPropertyItems("筆記", items).map((item) => item.barcode), ["1234567-01-10001"]);
+});
+
+test("searches property items by note", () => {
+    assert.deepEqual(searchPropertyItems("王老師", items).map((item) => item.barcode), ["1234567-01-10001"]);
+    assert.deepEqual(searchPropertyItems("24680", items).map((item) => item.barcode), ["1234567-01-10001"]);
+});
+
+test("searches property items by tags", () => {
+    assert.deepEqual(searchPropertyItems("gpu server", items).map((item) => item.barcode), ["1234567-01-10001"]);
+    assert.deepEqual(searchPropertyItems("# GPU Server", items).map((item) => item.barcode), ["1234567-01-10001"]);
+    assert.deepEqual(searchPropertyItems("網路", items).map((item) => item.barcode), ["9988776-03-30001"]);
+});
+
+test("filters property items by every selected tag", () => {
+    assert.deepEqual(
+        filterPropertyItemsByTags(items, ["GPU Server", "機房設備"]).map((item) => item.barcode),
+        ["1234567-01-10001"],
+    );
+    assert.deepEqual(filterPropertyItemsByTags(items, ["不存在"]), []);
+    assert.equal(filterPropertyItemsByTags(items, []), items);
+});
+
+test("combines selected tags with a later keyword search", () => {
+    const taggedItems = filterPropertyItemsByTags(items, ["GPU Server"]);
+
+    assert.deepEqual(searchPropertyItems("王老師", taggedItems).map((item) => item.barcode), ["1234567-01-10001"]);
+    assert.deepEqual(searchPropertyItems("交換器", taggedItems), []);
+});
+
+test("ranks notes matching every query token before partial fuzzy matches", () => {
+    assert.deepEqual(
+        searchPropertyItems("ip 80", items).slice(0, 2).map((item) => item.barcode),
+        ["9988776-03-30001", "1234567-01-10001"],
+    );
 });
 
 test("returns original items for blank queries", () => {

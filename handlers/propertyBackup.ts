@@ -8,6 +8,7 @@ import {PROPERTY_ITEMS_STORAGE_KEY, parseStoredPropertyItems, type PropertyItems
 import {PROPERTY_LABEL_QUEUE_STORAGE_KEY} from "./propertyLabelQueue.ts";
 import {PROPERTY_STATUS_VALUES} from "./propertyStatusStore.ts";
 import {PROPERTY_TEXT_SUGGESTIONS_STORAGE_KEY} from "./propertyTextSuggestions.ts";
+import {PROPERTY_TAG_CATEGORIES_STORAGE_KEY} from "./propertyTagging.ts";
 
 const BACKUP_MAGIC = "astalog-full-backup";
 const BACKUP_VERSION = 1;
@@ -20,10 +21,16 @@ const KNOWN_STORAGE_KEYS = new Set([
     AREA_LAYOUT_STORAGE_KEY,
     PROPERTY_LABEL_QUEUE_STORAGE_KEY,
     PROPERTY_TEXT_SUGGESTIONS_STORAGE_KEY,
+    PROPERTY_TAG_CATEGORIES_STORAGE_KEY,
 ]);
 const BACKUP_KEY = process.env.EXPO_PUBLIC_ASTALOG_BACKUP_KEY ?? "";
 const BASE64_CHUNK_BYTE_LENGTH = 192 * 1024;
 const BASE64_CHUNK_CHAR_LENGTH = (BASE64_CHUNK_BYTE_LENGTH / 3) * 4;
+const BACKUP_EXPORT_TEXT_END_PROGRESS = 15;
+const BACKUP_EXPORT_PACKAGE_START_PROGRESS = 75;
+const BACKUP_RESTORE_READ_END_PROGRESS = 25;
+const BACKUP_RESTORE_TEXT_END_PROGRESS = 35;
+const BACKUP_RESTORE_PHOTO_END_PROGRESS = 95;
 const TEXT_ENCODER = new TextEncoder();
 const TEXT_DECODER = new TextDecoder();
 const SHA256_INITIAL_HASHES = [
@@ -44,12 +51,11 @@ const SHA256_K = [
 export type BackupProgress = {
     message: string;
     progress: number;
-    targetProgress?: number;
-    millisecondsPerPercent?: number;
-    active?: boolean;
     current?: number;
     total?: number;
 };
+
+type FractionProgressCallback = (fraction: number) => void;
 
 export type BackupExportResult = {
     uri: string;
@@ -163,7 +169,12 @@ function createPayloadManifest(payload: BackupPayload, payloadLength: number): s
     });
 }
 
-async function stringifyBackupPayload(payload: BackupPayload): Promise<string> {
+async function stringifyBackupPayload(
+    payload: BackupPayload,
+    onProgress?: FractionProgressCallback,
+): Promise<string> {
+    const totalEntries = payload.storage.length + payload.files.length;
+    let completedEntries = 0;
     const chunks: string[] = [
         "{\"schemaVersion\":",
         String(payload.schemaVersion),
@@ -190,6 +201,8 @@ async function stringifyBackupPayload(payload: BackupPayload): Promise<string> {
             String(entry.byteLength),
             "}",
         );
+        completedEntries += 1;
+        onProgress?.(totalEntries > 0 ? completedEntries / totalEntries : 1);
         if (index % 8 === 0) await yieldToUi();
     }
 
@@ -211,10 +224,13 @@ async function stringifyBackupPayload(payload: BackupPayload): Promise<string> {
             String(entry.byteLength),
             "}",
         );
+        completedEntries += 1;
+        onProgress?.(totalEntries > 0 ? completedEntries / totalEntries : 1);
         await yieldToUi();
     }
 
     chunks.push("]}");
+    onProgress?.(1);
     await yieldToUi();
 
     return chunks.join("");
@@ -265,16 +281,41 @@ function formatBackupFileTimestamp(date: Date): string {
     ].join("");
 }
 
-function getTextEndProgress(hasPhotos: boolean): number {
-    return hasPhotos ? 20 : 90;
+function getTextEndProgress(hasPhotos: boolean, photoStartProgress: number, noPhotoEndProgress: number): number {
+    return hasPhotos ? photoStartProgress : noPhotoEndProgress;
 }
 
-function getPhotoStepProgress(index: number, total: number): {start: number; end: number} {
+function getPhotoStepProgress(
+    index: number,
+    total: number,
+    startProgress: number,
+    endProgress: number,
+): {start: number; end: number} {
     const safeTotal = Math.max(total, 1);
-    const start = 20 + (Math.max(index, 0) / safeTotal) * 70;
-    const end = Math.min(90, 20 + ((Math.max(index, 0) + 1) / safeTotal) * 70);
+    const progressRange = endProgress - startProgress;
+    const start = startProgress + (Math.max(index, 0) / safeTotal) * progressRange;
+    const end = Math.min(endProgress, startProgress + ((Math.max(index, 0) + 1) / safeTotal) * progressRange);
 
     return {start, end};
+}
+
+function createProgressRangeReporter(
+    onProgress: ((progress: BackupProgress) => void) | undefined,
+    message: string,
+    startProgress: number,
+    endProgress: number,
+): FractionProgressCallback {
+    let lastReportedProgress = Math.floor(startProgress);
+
+    return (fraction) => {
+        const clampedFraction = Math.min(1, Math.max(0, fraction));
+        const rawProgress = startProgress + clampedFraction * (endProgress - startProgress);
+        const nextProgress = clampedFraction >= 1 ? endProgress : Math.floor(rawProgress);
+        if (nextProgress <= lastReportedProgress) return;
+
+        lastReportedProgress = nextProgress;
+        onProgress?.({message, progress: nextProgress});
+    };
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -337,8 +378,8 @@ function textToBase64(value: string): string {
     return bytesToBase64(TEXT_ENCODER.encode(value));
 }
 
-async function textToBase64Async(value: string): Promise<string> {
-    return bytesToBase64Async(TEXT_ENCODER.encode(value));
+async function textToBase64Async(value: string, onProgress?: FractionProgressCallback): Promise<string> {
+    return bytesToBase64Async(TEXT_ENCODER.encode(value), onProgress);
 }
 
 function base64ToText(value: string): string {
@@ -349,8 +390,15 @@ async function base64ToTextAsync(value: string): Promise<string> {
     return TEXT_DECODER.decode(await base64ToBytesAsync(value));
 }
 
-async function bytesToBase64Async(bytes: Uint8Array): Promise<string> {
-    if (bytes.length <= BASE64_CHUNK_BYTE_LENGTH) return bytesToBase64(bytes);
+async function bytesToBase64Async(
+    bytes: Uint8Array,
+    onProgress?: FractionProgressCallback,
+): Promise<string> {
+    if (bytes.length <= BASE64_CHUNK_BYTE_LENGTH) {
+        const encoded = bytesToBase64(bytes);
+        onProgress?.(1);
+        return encoded;
+    }
 
     const chunks: string[] = [];
     let offset = 0;
@@ -368,15 +416,24 @@ async function bytesToBase64Async(bytes: Uint8Array): Promise<string> {
 
         chunks.push(bytesToBase64(bytes.subarray(offset, end)));
         offset = end;
+        onProgress?.(offset / bytes.length);
         await yieldToUi();
     }
 
+    onProgress?.(1);
     return chunks.join("");
 }
 
-async function base64ToBytesAsync(value: string): Promise<Uint8Array> {
+async function base64ToBytesAsync(
+    value: string,
+    onProgress?: FractionProgressCallback,
+): Promise<Uint8Array> {
     const normalized = value.replace(/\s/g, "");
-    if (normalized.length <= BASE64_CHUNK_CHAR_LENGTH) return base64ToBytes(normalized);
+    if (normalized.length <= BASE64_CHUNK_CHAR_LENGTH) {
+        const decoded = base64ToBytes(normalized);
+        onProgress?.(1);
+        return decoded;
+    }
 
     const padding = normalized.endsWith("==") ? 2 : normalized.endsWith("=") ? 1 : 0;
     const output = new Uint8Array((normalized.length / 4) * 3 - padding);
@@ -393,9 +450,11 @@ async function base64ToBytesAsync(value: string): Promise<Uint8Array> {
         output.set(chunkBytes, outputIndex);
         outputIndex += chunkBytes.length;
         offset = end;
-        await yieldToUi();
+        onProgress?.(offset / normalized.length);
+        await yieldToUiChunk(Math.ceil(offset / BASE64_CHUNK_CHAR_LENGTH));
     }
 
+    onProgress?.(1);
     return output;
 }
 
@@ -488,13 +547,22 @@ function getRandomBytes(byteCount: number): Uint8Array {
     return bytes;
 }
 
-async function xorWithBackupKey(bytes: Uint8Array, key: string, nonce: string): Promise<Uint8Array> {
+async function xorWithBackupKey(
+    bytes: Uint8Array,
+    key: string,
+    nonce: string,
+    onProgress?: FractionProgressCallback,
+): Promise<Uint8Array> {
     const keyBytes = hexToBytes(await sha256(`${key}:${nonce}`));
     const output = new Uint8Array(bytes.length);
     for (let index = 0; index < bytes.length; index += 1) {
         output[index] = bytes[index] ^ keyBytes[index % keyBytes.length];
-        if (index > 0 && index % BASE64_CHUNK_BYTE_LENGTH === 0) await yieldToUi();
+        if (index > 0 && index % BASE64_CHUNK_BYTE_LENGTH === 0) {
+            onProgress?.(index / bytes.length);
+            await yieldToUiChunk(index / BASE64_CHUNK_BYTE_LENGTH);
+        }
     }
+    onProgress?.(1);
     return output;
 }
 
@@ -513,6 +581,15 @@ async function yieldToUiFrame(): Promise<void> {
 
         setTimeout(resolve, 16);
     });
+}
+
+async function yieldToUiChunk(chunkIndex: number): Promise<void> {
+    if (chunkIndex % 4 === 0) {
+        await yieldToUiFrame();
+        return;
+    }
+
+    await yieldToUi();
 }
 
 function getPhotoDirectory(create = true): Directory {
@@ -598,20 +675,46 @@ function getSafeRestorePhotoFileName(relativePath: string): string {
     return sanitizeBackupFileNamePart(fileName);
 }
 
-async function createBackupEnvelope(payload: BackupPayload): Promise<BackupEnvelope> {
-    const payloadJson = await stringifyBackupPayload(payload);
+async function createBackupEnvelope(
+    payload: BackupPayload,
+    onProgress?: (progress: BackupProgress) => void,
+): Promise<BackupEnvelope> {
+    onProgress?.({message: "整理備份內容", progress: 75});
+    const payloadJson = await stringifyBackupPayload(
+        payload,
+        createProgressRangeReporter(onProgress, "整理備份內容", 75, 80),
+    );
+    await yieldToUiFrame();
+
     const backupKey = getBackupKey();
-    let payloadText = await textToBase64Async(payloadJson);
+    let payloadText: string;
     let payloadEncoding: BackupEnvelope["payloadEncoding"] = "base64-json";
     let nonce: string | undefined;
 
     if (backupKey) {
+        onProgress?.({message: "加密備份內容", progress: 80});
         nonce = bytesToHex(getRandomBytes(16));
-        const encryptedPayloadBytes = await xorWithBackupKey(TEXT_ENCODER.encode(payloadJson), backupKey, nonce);
-        payloadText = await bytesToBase64Async(encryptedPayloadBytes);
+        const encryptedPayloadBytes = await xorWithBackupKey(
+            TEXT_ENCODER.encode(payloadJson),
+            backupKey,
+            nonce,
+            createProgressRangeReporter(onProgress, "加密備份內容", 80, 87),
+        );
+        payloadText = await bytesToBase64Async(
+            encryptedPayloadBytes,
+            createProgressRangeReporter(onProgress, "編碼備份內容", 87, 94),
+        );
         payloadEncoding = "base64-xor-sha256-stream";
+    } else {
+        onProgress?.({message: "編碼備份內容", progress: 80});
+        payloadText = await textToBase64Async(
+            payloadJson,
+            createProgressRangeReporter(onProgress, "編碼備份內容", 80, 94),
+        );
     }
 
+    onProgress?.({message: "校驗備份內容", progress: 94});
+    await yieldToUiFrame();
     const envelope: BackupEnvelope = {
         magic: BACKUP_MAGIC,
         version: BACKUP_VERSION,
@@ -629,14 +732,23 @@ async function createBackupEnvelope(payload: BackupPayload): Promise<BackupEnvel
         envelope.keyedManifestSha256 = await sha256(`${backupKey}:${manifestSha256}`);
     }
 
+    onProgress?.({message: "備份內容整理完成", progress: 97});
     return envelope;
 }
 
-async function readBackupEnvelope(file: BackupReadableFile): Promise<BackupEnvelope> {
+async function readBackupEnvelope(
+    file: BackupReadableFile,
+    onProgress?: (progress: BackupProgress) => void,
+): Promise<BackupEnvelope> {
     let parsed: unknown;
 
     try {
-        parsed = JSON.parse(await file.text());
+        const fileText = await file.text();
+        onProgress?.({message: "解析備份檔", progress: 5});
+        await yieldToUiFrame();
+        parsed = JSON.parse(fileText);
+        onProgress?.({message: "解析備份檔", progress: 8});
+        await yieldToUiFrame();
     } catch {
         throw new Error("備份檔案不是有效的 JSON。");
     }
@@ -657,21 +769,38 @@ async function readBackupEnvelope(file: BackupReadableFile): Promise<BackupEnvel
     return envelope as BackupEnvelope;
 }
 
-async function decodeBackupPayload(envelope: BackupEnvelope): Promise<BackupPayload> {
+async function decodeBackupPayload(
+    envelope: BackupEnvelope,
+    onProgress?: (progress: BackupProgress) => void,
+): Promise<BackupPayload> {
     const backupKey = getBackupKey();
     if (envelope.encrypted) {
         if (!backupKey) throw new Error("此備份檔需要 EXPO_PUBLIC_ASTALOG_BACKUP_KEY 才能還原。");
         if (!envelope.nonce) throw new Error("加密備份檔缺少 nonce。");
     }
 
+    onProgress?.({message: "解碼備份內容", progress: 8});
+    const encodedPayloadBytes = await base64ToBytesAsync(
+        envelope.payload,
+        createProgressRangeReporter(onProgress, "解碼備份內容", 8, envelope.encrypted ? 16 : 19),
+    );
     const payloadBytes = envelope.encrypted
-        ? await xorWithBackupKey(await base64ToBytesAsync(envelope.payload), backupKey, envelope.nonce ?? "")
-        : await base64ToBytesAsync(envelope.payload);
+        ? await xorWithBackupKey(
+            encodedPayloadBytes,
+            backupKey,
+            envelope.nonce ?? "",
+            createProgressRangeReporter(onProgress, "解密備份內容", 16, 19),
+        )
+        : encodedPayloadBytes;
+    onProgress?.({message: "解析備份內容", progress: 19});
+    await yieldToUiFrame();
     const payloadJson = TEXT_DECODER.decode(payloadBytes);
 
     let payload: unknown;
     try {
         payload = JSON.parse(payloadJson);
+        onProgress?.({message: "檢查備份內容", progress: 23});
+        await yieldToUiFrame();
     } catch {
         throw new Error("備份檔 payload 無法解析。");
     }
@@ -686,6 +815,7 @@ async function decodeBackupPayload(envelope: BackupEnvelope): Promise<BackupPayl
         if (keyedManifestSha256 !== envelope.keyedManifestSha256) throw new Error("備份金鑰不正確，無法還原此備份檔。");
     }
 
+    onProgress?.({message: "備份內容讀取完成", progress: 25});
     return payload as BackupPayload;
 }
 
@@ -733,16 +863,17 @@ export async function createFullBackupFile(onProgress?: (progress: BackupProgres
     const propertyItemsValue = keyValuePairs.find(([key]) => key === PROPERTY_ITEMS_STORAGE_KEY)?.[1] ?? null;
     const itemsByBarcode = parseStoredPropertyItems(propertyItemsValue);
     const photoFiles = collectStoredPhotoFiles(itemsByBarcode);
-    const textEndProgress = getTextEndProgress(photoFiles.length > 0);
+    const textEndProgress = getTextEndProgress(
+        photoFiles.length > 0,
+        BACKUP_EXPORT_TEXT_END_PROGRESS,
+        BACKUP_EXPORT_PACKAGE_START_PROGRESS,
+    );
     const storage: StoredTextEntry[] = [];
     const files: StoredFileEntry[] = [];
 
     onProgress?.({
         message: "編碼文字資料",
         progress: 1,
-        targetProgress: textEndProgress,
-        millisecondsPerPercent: 300,
-        active: true,
         current: 0,
         total: keyValuePairs.length,
     });
@@ -758,20 +889,29 @@ export async function createFullBackupFile(onProgress?: (progress: BackupProgres
             sha256: await sha256Bytes(valueBytes),
             byteLength: valueBytes.byteLength,
         });
+        const {end} = getPhotoStepProgress(index, keyValuePairs.length, 1, textEndProgress);
+        onProgress?.({
+            message: "編碼文字資料",
+            progress: end,
+            current: index + 1,
+            total: keyValuePairs.length,
+        });
         if (index % 8 === 0) await yieldToUi();
     }
     onProgress?.({message: "文字資料備份完成", progress: textEndProgress, current: keyValuePairs.length, total: keyValuePairs.length});
 
     for (let index = 0; index < photoFiles.length; index += 1) {
         const {file, relativePath} = photoFiles[index];
-        const {start, end} = getPhotoStepProgress(index, photoFiles.length);
+        const {start, end} = getPhotoStepProgress(
+            index,
+            photoFiles.length,
+            BACKUP_EXPORT_TEXT_END_PROGRESS,
+            BACKUP_EXPORT_PACKAGE_START_PROGRESS,
+        );
 
         onProgress?.({
             message: "正在備份圖片",
             progress: start,
-            targetProgress: end,
-            millisecondsPerPercent: 500,
-            active: true,
             current: index + 1,
             total: photoFiles.length,
         });
@@ -792,26 +932,28 @@ export async function createFullBackupFile(onProgress?: (progress: BackupProgres
 
     onProgress?.({
         message: getBackupKey() ? "加密並建立備份檔" : "建立備份檔",
-        progress: 90,
-        targetProgress: 100,
-        millisecondsPerPercent: 300,
-        active: true,
+        progress: BACKUP_EXPORT_PACKAGE_START_PROGRESS,
     });
     await yieldToUiFrame();
     const createdAtDate = new Date();
     const createdAt = createdAtDate.toISOString();
-    const envelope = await createBackupEnvelope({
-        schemaVersion: BACKUP_VERSION,
-        createdAt,
-        appVersion: getAppVersion(),
-        platform: Platform.OS,
-        storage,
-        files,
-    });
+    const envelope = await createBackupEnvelope(
+        {
+            schemaVersion: BACKUP_VERSION,
+            createdAt,
+            appVersion: getAppVersion(),
+            platform: Platform.OS,
+            storage,
+            files,
+        },
+        onProgress,
+    );
     const fileName = `Astalog-${formatBackupFileTimestamp(createdAtDate)}-Backup.${BACKUP_FILE_EXTENSION}`;
     const backupFile = new File(Paths.cache, fileName);
     if (backupFile.exists) backupFile.delete();
     backupFile.create({overwrite: true});
+    onProgress?.({message: "寫入備份檔", progress: 98});
+    await yieldToUiFrame();
     backupFile.write(stringifyBackupEnvelope(envelope));
     onProgress?.({message: "備份檔建立完成", progress: 100});
 
@@ -849,24 +991,22 @@ export async function restoreFullBackupFile(file: BackupReadableFile, onProgress
     onProgress?.({
         message: "讀取備份檔",
         progress: 1,
-        targetProgress: 10,
-        millisecondsPerPercent: 300,
-        active: true,
     });
     await yieldToUiFrame();
-    const envelope = await readBackupEnvelope(file);
-    const payload = await decodeBackupPayload(envelope);
-    onProgress?.({message: "讀取備份檔", progress: 10});
+    const envelope = await readBackupEnvelope(file, onProgress);
+    const payload = await decodeBackupPayload(envelope, onProgress);
+    onProgress?.({message: "讀取備份檔", progress: BACKUP_RESTORE_READ_END_PROGRESS});
     const storageValues = new Map<string, string>();
     const hasPhotos = payload.files.length > 0;
-    const textEndProgress = getTextEndProgress(hasPhotos);
+    const textEndProgress = getTextEndProgress(
+        hasPhotos,
+        BACKUP_RESTORE_TEXT_END_PROGRESS,
+        BACKUP_RESTORE_PHOTO_END_PROGRESS,
+    );
 
     onProgress?.({
         message: "驗證文字資料",
-        progress: 10,
-        targetProgress: textEndProgress,
-        millisecondsPerPercent: 500,
-        active: true,
+        progress: BACKUP_RESTORE_READ_END_PROGRESS,
         current: 0,
         total: payload.storage.length,
     });
@@ -874,17 +1014,32 @@ export async function restoreFullBackupFile(file: BackupReadableFile, onProgress
     for (let index = 0; index < payload.storage.length; index += 1) {
         const entry = payload.storage[index];
         storageValues.set(entry.key, await validateStorageEntry(entry));
+        const {end} = getPhotoStepProgress(
+            index,
+            payload.storage.length,
+            BACKUP_RESTORE_READ_END_PROGRESS,
+            textEndProgress,
+        );
+        onProgress?.({
+            message: "驗證文字資料",
+            progress: end,
+            current: index + 1,
+            total: payload.storage.length,
+        });
         if (index % 8 === 0) await yieldToUi();
     }
     onProgress?.({message: "文字資料驗證完成", progress: textEndProgress, current: payload.storage.length, total: payload.storage.length});
 
     for (let index = 0; index < payload.files.length; index += 1) {
-        const {start, end} = getPhotoStepProgress(index, payload.files.length * 2);
+        const {start, end} = getPhotoStepProgress(
+            index,
+            payload.files.length * 2,
+            BACKUP_RESTORE_TEXT_END_PROGRESS,
+            BACKUP_RESTORE_PHOTO_END_PROGRESS,
+        );
         onProgress?.({
             message: "正在還原與檢查圖片",
             progress: start,
-            targetProgress: end,
-            active: true,
             current: index + 1,
             total: payload.files.length * 2,
         });
@@ -900,7 +1055,12 @@ export async function restoreFullBackupFile(file: BackupReadableFile, onProgress
         storageValues.set(PROPERTY_ITEMS_STORAGE_KEY, JSON.stringify(rewrittenItems));
     }
 
-    onProgress?.({message: "清除現有本機資料", progress: hasPhotos ? 55 : 99});
+    onProgress?.({
+        message: "清除現有本機資料",
+        progress: hasPhotos
+            ? (BACKUP_RESTORE_TEXT_END_PROGRESS + BACKUP_RESTORE_PHOTO_END_PROGRESS) / 2
+            : BACKUP_RESTORE_PHOTO_END_PROGRESS,
+    });
     const currentKeys = (await AsyncStorage.getAllKeys()).filter(isBackupStorageKey);
     if (currentKeys.length > 0) await AsyncStorage.multiRemove(currentKeys);
 
@@ -912,13 +1072,16 @@ export async function restoreFullBackupFile(file: BackupReadableFile, onProgress
         const entry = payload.files[index];
         const fileName = getSafeRestorePhotoFileName(entry.relativePath);
         const destinationFile = new File(getPhotoDirectory(), fileName);
-        const {start, end} = getPhotoStepProgress(payload.files.length + index, payload.files.length * 2);
+        const {start, end} = getPhotoStepProgress(
+            payload.files.length + index,
+            payload.files.length * 2,
+            BACKUP_RESTORE_TEXT_END_PROGRESS,
+            BACKUP_RESTORE_PHOTO_END_PROGRESS,
+        );
 
         onProgress?.({
             message: "正在還原與檢查圖片",
             progress: start,
-            targetProgress: end,
-            active: true,
             current: payload.files.length + index + 1,
             total: payload.files.length * 2,
         });
@@ -939,11 +1102,11 @@ export async function restoreFullBackupFile(file: BackupReadableFile, onProgress
         await yieldToUi();
     }
 
-    onProgress?.({message: "寫入本機資料", progress: 99});
+    onProgress?.({message: "寫入本機資料", progress: BACKUP_RESTORE_PHOTO_END_PROGRESS});
     const nextStoragePairs = [...storageValues.entries()].filter(([key]) => isBackupStorageKey(key));
     if (nextStoragePairs.length > 0) await AsyncStorage.multiSet(nextStoragePairs);
 
-    onProgress?.({message: "檢查還原結果", progress: 99});
+    onProgress?.({message: "檢查還原結果", progress: 98});
     const restoredPairs = nextStoragePairs.length > 0 ? await AsyncStorage.multiGet(nextStoragePairs.map(([key]) => key)) : [];
     for (const [key, expectedValue] of nextStoragePairs) {
         if (restoredPairs.find(([storedKey]) => storedKey === key)?.[1] !== expectedValue) {

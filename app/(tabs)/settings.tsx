@@ -1,8 +1,6 @@
 import React, {useCallback, useEffect, useRef, useState} from "react";
 import {
     Alert,
-    Animated,
-    Easing,
     Image,
     LayoutAnimation,
     Linking,
@@ -12,6 +10,14 @@ import {
     TouchableOpacity,
     View
 } from "react-native";
+import Reanimated, {
+    cancelAnimation,
+    Easing as ReanimatedEasing,
+    useAnimatedStyle,
+    useSharedValue,
+    withRepeat,
+    withTiming,
+} from "react-native-reanimated";
 import {type Href, router} from "expo-router";
 import {Button, Icon, Text} from "react-native-magnus";
 import {useSafeAreaInsets} from "react-native-safe-area-context";
@@ -44,7 +50,6 @@ import {
     cleanupPropertyLabelPdf,
     createPropertyLabelPdf,
     type PropertyLabelPdfExportResult,
-    type PropertyLabelPdfProgress,
     sharePropertyLabelPdf,
 } from "@/handlers/propertyLabelPdf";
 import {
@@ -55,15 +60,27 @@ import {
 } from "@/handlers/propertyExcelExport";
 import {
     type BackupExportResult,
-    type BackupProgress,
     cleanupBackupFile,
     createFullBackupFile,
     getExistingBackupTargetSummary,
     restoreFullBackupFile,
     shareBackupFile,
 } from "@/handlers/propertyBackup";
+import {getAvailablePropertyYears} from "@/handlers/propertyList";
+import {comparePropertyYearsDescending} from "@/handlers/propertyYears";
+import {
+    cleanupPropertyReportPdf,
+    createPropertyReportPdf,
+    type PropertyReportPdfExportResult,
+    sharePropertyReportPdf,
+} from "@/handlers/propertyReportPdf";
 
-type ProgressUpdate = BackupProgress | PropertyLabelPdfProgress;
+type ProgressUpdate = {
+    message: string;
+    progress: number;
+    current?: number;
+    total?: number;
+};
 type AllPropertyLabelExportScope = "all" | "latest";
 type VersionRecordFetchResult = {
     entries: VersionRecordEntry[];
@@ -100,6 +117,33 @@ type ProgressOperation = ProgressUpdate & {
     title: string;
     completed?: boolean;
 };
+
+function BackupProgressSpinner() {
+    const rotation = useSharedValue(0);
+
+    useEffect(() => {
+        rotation.set(withRepeat(
+            withTiming(360, {duration: 1800, easing: ReanimatedEasing.linear}),
+            -1,
+            false,
+        ));
+
+        return () => {
+            cancelAnimation(rotation);
+            rotation.set(0);
+        };
+    }, [rotation]);
+
+    const animatedStyle = useAnimatedStyle(() => ({
+        transform: [{rotate: `${rotation.get()}deg`}],
+    }));
+
+    return (
+        <Reanimated.View style={[styles.backupProgressSpinner, animatedStyle]} pointerEvents="none">
+            <Icon name="refresh-cw" fontFamily="Feather" fontSize={28} color="#2563EB" />
+        </Reanimated.View>
+    );
+}
 
 function getNestedValue(source: unknown, path: string[]): unknown {
     return path.reduce<unknown>((current, key) => {
@@ -315,152 +359,34 @@ export default function Settings()
     const [expandedVersionRecordKeys, setExpandedVersionRecordKeys] = useState<Record<string, boolean>>({});
     const [versionRecordLoading, setVersionRecordLoading] = useState(false);
     const [versionRecordUsingLocal, setVersionRecordUsingLocal] = useState(true);
-    const [backupDisplayedProgress, setBackupDisplayedProgress] = useState(1);
-    const [backupProgressTrackWidth, setBackupProgressTrackWidth] = useState(0);
-    const backupSpinValue = useRef(new Animated.Value(0)).current;
-    const backupProgressValue = useRef(new Animated.Value(1)).current;
-    const backupProgressTextTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-    const backupProgressAnimationVersionRef = useRef(0);
+    const [reportYearModalVisible, setReportYearModalVisible] = useState(false);
+    const [reportYears, setReportYears] = useState<string[]>([]);
+    const [selectedReportYear, setSelectedReportYear] = useState<string | null>(null);
+    const [reportYearsLoading, setReportYearsLoading] = useState(false);
+    const backupProgressValue = useSharedValue(1);
     const versionRecordRequestIdRef = useRef(0);
     const backupOperationVisible = backupOperation !== null;
 
     useEffect(() => {
-        if (!backupOperationVisible) {
-            backupSpinValue.stopAnimation();
-            backupSpinValue.setValue(0);
-            return;
-        }
+        if (backupOperationVisible) return;
 
-        backupSpinValue.setValue(0);
-        const animation = Animated.loop(
-            Animated.timing(backupSpinValue, {
-                toValue: 1,
-                duration: 900,
-                easing: Easing.linear,
-                useNativeDriver: true,
-                isInteraction: false,
-            }),
-        );
-        animation.start();
+        cancelAnimation(backupProgressValue);
+        backupProgressValue.set(1);
+    }, [backupOperationVisible, backupProgressValue]);
 
-        return () => {
-            animation.stop();
-        };
-    }, [backupOperationVisible, backupSpinValue]);
+    const backupProgressAnimatedStyle = useAnimatedStyle(() => ({
+        width: `${backupProgressValue.get()}%`,
+    }));
 
-    const driveProgressBar = useCallback((progress: ProgressUpdate) => {
-        const animationVersion = backupProgressAnimationVersionRef.current + 1;
-        backupProgressAnimationVersionRef.current = animationVersion;
-        const targetProgress = Math.min(100, Math.max(1, progress.progress));
-        const activeTargetProgress = progress.targetProgress === undefined
-            ? targetProgress
-            : Math.min(100, Math.max(targetProgress, progress.targetProgress));
-        const activeMillisecondsPerPercent = progress.millisecondsPerPercent ?? 800;
-
-        backupProgressValue.stopAnimation((currentProgress) => {
-            if (animationVersion !== backupProgressAnimationVersionRef.current) return;
-
-            const current = Number(currentProgress);
-            const animateToProgress = (
-                nextProgress: number,
-                duration: number,
-                easing: (value: number) => number,
-                onDone?: () => void,
-            ) => {
-                Animated.timing(backupProgressValue, {
-                    toValue: nextProgress,
-                    duration,
-                    easing,
-                    useNativeDriver: true,
-                    isInteraction: false,
-                }).start(({finished}) => {
-                    if (finished && animationVersion === backupProgressAnimationVersionRef.current) onDone?.();
-                });
-            };
-
-            if (progress.active) {
-                const beginActiveProgress = Math.max(current, targetProgress);
-                const runActiveProgress = () => {
-                    const distance = Math.max(0, activeTargetProgress - beginActiveProgress);
-                    if (distance <= 0) return;
-                    animateToProgress(
-                        activeTargetProgress,
-                        distance * activeMillisecondsPerPercent,
-                        Easing.linear,
-                    );
-                };
-
-                if (current + 0.1 < targetProgress) {
-                    const catchUpDistance = targetProgress - current;
-                    animateToProgress(
-                        targetProgress,
-                        Math.max(220, Math.min(700, catchUpDistance * 55)),
-                        Easing.out(Easing.cubic),
-                        runActiveProgress,
-                    );
-                    return;
-                }
-
-                runActiveProgress();
-                return;
-            }
-
-            const nextProgress = Math.max(current, targetProgress);
-            const distance = Math.max(0, nextProgress - current);
-            animateToProgress(
-                nextProgress,
-                progress.progress >= 100
-                    ? Math.max(220, Math.min(520, distance * 45))
-                    : Math.max(220, Math.min(700, distance * 55)),
-                Easing.out(Easing.cubic),
-            );
-        });
+    const setProgressImmediately = useCallback((progress: number) => {
+        const nextProgress = Math.min(100, Math.max(1, progress));
+        cancelAnimation(backupProgressValue);
+        backupProgressValue.set(nextProgress);
     }, [backupProgressValue]);
 
-    const clearProgressTextTimer = useCallback(() => {
-        if (backupProgressTextTimerRef.current) {
-            clearInterval(backupProgressTextTimerRef.current);
-            backupProgressTextTimerRef.current = null;
-        }
-    }, []);
-
-    const driveProgressText = useCallback((progress: ProgressUpdate) => {
-        clearProgressTextTimer();
-
-        const startProgress = Math.round(Math.min(100, Math.max(1, progress.progress)));
-        const targetProgress = Math.round(Math.min(100, Math.max(startProgress, progress.targetProgress ?? progress.progress)));
-
-        if (!progress.active) {
-            setBackupDisplayedProgress(startProgress);
-            return;
-        }
-
-        setBackupDisplayedProgress((current) => Math.max(current, startProgress));
-        backupProgressTextTimerRef.current = setInterval(() => {
-            setBackupDisplayedProgress((current) => {
-                if (current >= targetProgress) {
-                    clearProgressTextTimer();
-                    return targetProgress;
-                }
-
-                return Math.min(targetProgress, current + 1);
-            });
-        }, progress.millisecondsPerPercent ?? 800);
-    }, [clearProgressTextTimer]);
-
     const resetProgressVisuals = useCallback(() => {
-        backupProgressAnimationVersionRef.current += 1;
-        backupProgressValue.stopAnimation();
-        backupProgressValue.setValue(1);
-        clearProgressTextTimer();
-        setBackupDisplayedProgress(1);
-    }, [backupProgressValue, clearProgressTextTimer]);
-
-    useEffect(() => {
-        if (!backupOperation) clearProgressTextTimer();
-    }, [backupOperation, clearProgressTextTimer]);
-
-    useEffect(() => () => clearProgressTextTimer(), [clearProgressTextTimer]);
+        setProgressImmediately(1);
+    }, [setProgressImmediately]);
 
     const showComingSoon = async () => {
         await inDevHandler();
@@ -544,10 +470,20 @@ export default function Settings()
     }, []);
 
     const updateProgressOperation = useCallback((title: string, progress: ProgressUpdate) => {
-        driveProgressBar(progress);
-        driveProgressText(progress);
-        setBackupOperation({title, ...progress, completed: progress.progress >= 100});
-    }, [driveProgressBar, driveProgressText]);
+        const nextProgress = Math.min(100, Math.max(1, progress.progress));
+        backupProgressValue.set(withTiming(nextProgress, {
+            duration: nextProgress >= 100 ? 120 : 180,
+            easing: ReanimatedEasing.out(ReanimatedEasing.cubic),
+        }));
+        setBackupOperation({
+            title,
+            message: progress.message,
+            progress: nextProgress,
+            current: progress.current,
+            total: progress.total,
+            completed: nextProgress >= 100,
+        });
+    }, [backupProgressValue]);
 
     const handlePropertyImport = useCallback(async () => {
         const currentAreaLayout = await getStoredAreaLayout().catch(() => null);
@@ -736,8 +672,7 @@ export default function Settings()
                 (progress) => updateProgressOperation(title, progress),
             );
             shouldCleanupExportedPdf = true;
-            clearProgressTextTimer();
-            setBackupDisplayedProgress(100);
+            setProgressImmediately(100);
             setBackupOperation({title, message: "PDF 建立完成", progress: 100, completed: true});
             await new Promise((resolve) => setTimeout(resolve, 520));
             const shared = await sharePropertyLabelPdf(
@@ -762,7 +697,7 @@ export default function Settings()
         }
 
         return exported;
-    }, [clearProgressTextTimer, resetProgressVisuals, updateProgressOperation]);
+    }, [resetProgressVisuals, setProgressImmediately, updateProgressOperation]);
 
     const handlePropertyLabelPdfExport = useCallback(async (mode: "all" | "queued") => {
         let labels: PropertyLabelPrintItem[] = [];
@@ -946,6 +881,70 @@ export default function Settings()
         }
     }, [hideSpinner, showSpinner]);
 
+    const openPropertyReportYearModal = useCallback(() => {
+        setReportYears([]);
+        setSelectedReportYear(null);
+        setReportYearsLoading(true);
+        setReportYearModalVisible(true);
+
+        void (async () => {
+            try {
+                const years = [...await getAvailablePropertyYears()].sort(comparePropertyYearsDescending);
+                setReportYears(years);
+                setSelectedReportYear(years[0] ?? null);
+            } catch (error) {
+                console.error("讀取盤點報告年度失敗:", error);
+                setReportYearModalVisible(false);
+                Alert.alert("無法讀取年度", "目前無法取得可匯出的盤點年度，請稍後再試。");
+            } finally {
+                setReportYearsLoading(false);
+            }
+        })();
+    }, []);
+
+    const handlePropertyReportExport = useCallback(async () => {
+        if (!selectedReportYear) return;
+
+        const year = selectedReportYear;
+        let exportedReport: PropertyReportPdfExportResult | null = null;
+        let shouldCleanupExportedReport = false;
+
+        setReportYearModalVisible(false);
+        await waitForNextModalFrame();
+
+        try {
+            const title = "匯出盤點報告";
+            resetProgressVisuals();
+            setBackupOperation({title, message: "準備盤點報告資料", progress: 1});
+            exportedReport = await createPropertyReportPdf(
+                year,
+                (progress) => updateProgressOperation(title, progress),
+            );
+            shouldCleanupExportedReport = true;
+            setProgressImmediately(100);
+            setBackupOperation({title, message: "盤點報告建立完成", progress: 100, completed: true});
+            await new Promise((resolve) => setTimeout(resolve, 520));
+
+            const shared = await sharePropertyReportPdf(exportedReport.uri);
+            shouldCleanupExportedReport = shared;
+            setBackupOperation(null);
+
+            if (!shared) {
+                Alert.alert(
+                    "盤點報告已建立",
+                    `已匯出 ${year} 年度共 ${exportedReport.itemCount} 個項目、${exportedReport.numberOfPages} 頁：\n${exportedReport.fileName}\n${exportedReport.uri}`,
+                );
+            }
+        } catch (error) {
+            const message = getErrorMessage(error) ?? "無法匯出盤點報告，請稍後再試。";
+            console.error("匯出盤點報告失敗:", error);
+            Alert.alert("匯出失敗", message);
+        } finally {
+            if (exportedReport && shouldCleanupExportedReport) cleanupPropertyReportPdf(exportedReport);
+            setBackupOperation(null);
+        }
+    }, [resetProgressVisuals, selectedReportYear, setProgressImmediately, updateProgressOperation]);
+
     const handleBackupExport = useCallback(async () => {
         let exportedBackup: BackupExportResult | null = null;
         let shouldCleanupBackup = false;
@@ -961,8 +960,7 @@ export default function Settings()
             setBackupOperation({title: "匯出備份", message: "準備備份資料", progress: 1});
             exportedBackup = await createFullBackupFile((progress) => updateProgressOperation("匯出備份", progress));
             shouldCleanupBackup = true;
-            clearProgressTextTimer();
-            setBackupDisplayedProgress(100);
+            setProgressImmediately(100);
             setBackupOperation({title: "匯出備份", message: "備份檔建立完成", progress: 100, completed: true});
             await new Promise((resolve) => setTimeout(resolve, 520));
 
@@ -990,7 +988,7 @@ export default function Settings()
             if (exportedBackup && shouldCleanupBackup) cleanupBackupFile(exportedBackup.uri);
             setBackupOperation(null);
         }
-    }, [clearProgressTextTimer, resetProgressVisuals, updateProgressOperation]);
+    }, [resetProgressVisuals, setProgressImmediately, updateProgressOperation]);
 
     const confirmBackupRestoreOverwrite = useCallback(async (): Promise<boolean> => {
         const summary = await getExistingBackupTargetSummary();
@@ -1043,15 +1041,9 @@ export default function Settings()
         }
     }, [confirmBackupRestoreOverwrite, resetProgressVisuals, updateProgressOperation]);
 
-    const backupSpin = backupSpinValue.interpolate({
-        inputRange: [0, 1],
-        outputRange: ["0deg", "360deg"],
-    });
-    const backupProgressTranslateX = backupProgressValue.interpolate({
-        inputRange: [0, 100],
-        outputRange: [-(backupProgressTrackWidth || 320), 0],
-    });
-
+    const backupOperationHasCount = backupOperation?.current !== undefined
+        && backupOperation.total !== undefined
+        && backupOperation.total > 0;
     return (
         <View style={styles.container}>
             <View style={[styles.header, {paddingTop: insets.top + 18}]}>
@@ -1138,6 +1130,14 @@ export default function Settings()
                         color="green500"
                         onPress={() => { void handlePropertyExcelExport(); }}
                     />
+                    <MenuRow
+                        title="匯出盤點報告 PDF"
+                        description="選擇年度並輸出完整盤點報告文件"
+                        icon="file-pdf-box"
+                        iconFamily="MaterialCommunityIcons"
+                        color="red500"
+                        onPress={openPropertyReportYearModal}
+                    />
                 </Section>
 
                 <Section title="備份管理">
@@ -1179,6 +1179,89 @@ export default function Settings()
                     版本 {require("@/app.json").expo.version}
                 </Text>
             </ScrollView>
+            <Modal
+                visible={reportYearModalVisible}
+                transparent
+                animationType="fade"
+                onRequestClose={() => setReportYearModalVisible(false)}
+            >
+                <View style={styles.centerModalBackdrop}>
+                    <View style={styles.reportYearModalPanel}>
+                        <View style={styles.reportYearModalHeader}>
+                            <View style={styles.reportYearModalIcon}>
+                                <Icon name="file-pdf-box" fontFamily="MaterialCommunityIcons" fontSize="2xl" color="#DC2626" />
+                            </View>
+                            <View style={styles.reportYearTitleBlock}>
+                                <Text fontSize="xl" fontWeight="bold" color="gray900">匯出盤點報告</Text>
+                                <Text mt={4} fontSize="sm" color="gray600">選擇要彙整的盤點年度</Text>
+                            </View>
+                            <TouchableOpacity
+                                onPress={() => setReportYearModalVisible(false)}
+                                hitSlop={{top: 10, bottom: 10, left: 10, right: 10}}
+                                style={styles.reportYearCloseButton}
+                            >
+                                <Icon name="x" fontFamily="Feather" fontSize="xl" color="gray700" />
+                            </TouchableOpacity>
+                        </View>
+
+                        <ScrollView style={styles.reportYearList} contentContainerStyle={styles.reportYearListContent}>
+                            {reportYearsLoading ? (
+                                <View style={styles.reportYearEmptyState}>
+                                    <Text fontSize="md" color="gray600">正在讀取可用年度…</Text>
+                                </View>
+                            ) : reportYears.length === 0 ? (
+                                <View style={styles.reportYearEmptyState}>
+                                    <Text fontSize="md" color="gray600" textAlign="center">目前沒有可匯出的財產年度</Text>
+                                </View>
+                            ) : reportYears.map((year, index) => {
+                                const selected = year === selectedReportYear;
+                                return (
+                                    <TouchableOpacity
+                                        key={year}
+                                        activeOpacity={0.75}
+                                        onPress={() => setSelectedReportYear(year)}
+                                        style={[styles.reportYearOption, selected && styles.reportYearOptionSelected]}
+                                    >
+                                        <View style={[styles.reportYearRadio, selected && styles.reportYearRadioSelected]}>
+                                            {selected && <View style={styles.reportYearRadioDot} />}
+                                        </View>
+                                        <View style={styles.reportYearOptionText}>
+                                            <Text fontSize="lg" fontWeight="bold" color="gray900">{year} 年度</Text>
+                                            {index === 0 && <Text mt={2} fontSize="xs" color="#2563EB">最新年度</Text>}
+                                        </View>
+                                        {selected && <Icon name="check" fontFamily="Feather" fontSize="xl" color="#2563EB" />}
+                                    </TouchableOpacity>
+                                );
+                            })}
+                        </ScrollView>
+
+                        <View style={styles.reportYearModalFooter}>
+                            <Button
+                                flex={1}
+                                mr="xs"
+                                bg="gray200"
+                                color="gray800"
+                                rounded={12}
+                                onPress={() => setReportYearModalVisible(false)}
+                            >
+                                取消
+                            </Button>
+                            <Button
+                                flex={1}
+                                ml="xs"
+                                bg={selectedReportYear ? "blue500" : "gray300"}
+                                color="#FFFFFF"
+                                rounded={12}
+                                disabled={!selectedReportYear || reportYearsLoading}
+                                onPress={() => { void handlePropertyReportExport(); }}
+                                suffix={<Icon name="export" fontFamily="MaterialCommunityIcons" fontSize="md" ml="xs" color="#FFFFFF" />}
+                            >
+                                產生 PDF
+                            </Button>
+                        </View>
+                    </View>
+                </View>
+            </Modal>
             <Modal
                 visible={versionRecordModalVisible}
                 transparent
@@ -1378,31 +1461,35 @@ export default function Settings()
                                         <Icon name="check" fontFamily="Feather" fontSize={30} color="#16A34A" />
                                     </View>
                                 ) : (
-                                    <Animated.View style={[styles.backupProgressIcon, {transform: [{rotate: backupSpin}]}]}>
-                                        <Icon name="refresh-cw" fontFamily="Feather" fontSize={28} color="#2563EB" />
-                                    </Animated.View>
+                                    <View style={styles.backupProgressIcon}>
+                                        <BackupProgressSpinner />
+                                    </View>
                                 )}
                                 <Text mt={14} fontSize="xl" fontWeight="bold" color="gray900" textAlign="center">
                                     {backupOperation.title}
                                 </Text>
-                                <Text mt={8} fontSize="md" color="gray700" textAlign="center" lineHeight={22}>
-                                    {backupOperation.message}
-                                </Text>
+                                <View style={styles.backupProgressMessageArea}>
+                                    <Text fontSize="md" color="gray700" textAlign="center" lineHeight={22}>
+                                        {backupOperation.message}
+                                    </Text>
+                                    {backupOperationHasCount && (
+                                        <Text mt={4} fontSize="sm" color="gray500" textAlign="center">
+                                            {Math.min(backupOperation.current ?? 0, backupOperation.total ?? 0)} / {backupOperation.total}
+                                        </Text>
+                                    )}
+                                </View>
                                 {!backupOperation.completed && (
                                     <>
-                                        <View
-                                            style={styles.backupProgressTrack}
-                                            onLayout={(event) => setBackupProgressTrackWidth(event.nativeEvent.layout.width)}
-                                        >
-                                            <Animated.View
+                                        <View style={styles.backupProgressTrack}>
+                                            <Reanimated.View
                                                 style={[
                                                     styles.backupProgressBar,
-                                                    {transform: [{translateX: backupProgressTranslateX}]},
+                                                    backupProgressAnimatedStyle,
                                                 ]}
                                             />
                                         </View>
                                         <Text mt={8} fontSize="sm" color="gray600">
-                                            {backupDisplayedProgress}%
+                                            {Math.round(Math.min(100, Math.max(1, backupOperation.progress)))}%
                                         </Text>
                                     </>
                                 )}
@@ -1572,6 +1659,110 @@ const styles = StyleSheet.create({
         justifyContent: "center",
         paddingHorizontal: 18,
         backgroundColor: "rgba(15, 23, 42, 0.42)",
+    },
+    reportYearModalPanel: {
+        width: "100%",
+        maxWidth: 400,
+        borderRadius: 18,
+        paddingHorizontal: 18,
+        paddingTop: 18,
+        paddingBottom: 16,
+        backgroundColor: "#FFFFFF",
+        shadowColor: "#475569",
+        shadowOffset: {width: 0, height: 8},
+        shadowOpacity: 0.16,
+        shadowRadius: 20,
+        elevation: 8,
+    },
+    reportYearModalHeader: {
+        minHeight: 48,
+        flexDirection: "row",
+        alignItems: "center",
+        paddingRight: 42,
+        paddingBottom: 14,
+        borderBottomWidth: StyleSheet.hairlineWidth,
+        borderBottomColor: "#E5E7EB",
+    },
+    reportYearModalIcon: {
+        width: 40,
+        height: 40,
+        borderRadius: 12,
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: "#FEF2F2",
+    },
+    reportYearTitleBlock: {
+        flex: 1,
+        minWidth: 0,
+        paddingLeft: 12,
+    },
+    reportYearCloseButton: {
+        position: "absolute",
+        top: 2,
+        right: 0,
+        width: 34,
+        height: 34,
+        borderRadius: 17,
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: "#F3F4F6",
+    },
+    reportYearList: {
+        maxHeight: 330,
+        marginTop: 14,
+        borderRadius: 12,
+        overflow: "hidden",
+        backgroundColor: "#F8FAFC",
+    },
+    reportYearListContent: {
+        flexGrow: 1,
+    },
+    reportYearEmptyState: {
+        minHeight: 100,
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 18,
+    },
+    reportYearOption: {
+        minHeight: 68,
+        flexDirection: "row",
+        alignItems: "center",
+        paddingHorizontal: 14,
+        paddingVertical: 10,
+        borderBottomWidth: StyleSheet.hairlineWidth,
+        borderBottomColor: "#E2E8F0",
+        backgroundColor: "#FFFFFF",
+    },
+    reportYearOptionSelected: {
+        backgroundColor: "#EFF6FF",
+    },
+    reportYearRadio: {
+        width: 22,
+        height: 22,
+        borderRadius: 11,
+        alignItems: "center",
+        justifyContent: "center",
+        borderWidth: 2,
+        borderColor: "#94A3B8",
+        backgroundColor: "#FFFFFF",
+    },
+    reportYearRadioSelected: {
+        borderColor: "#2563EB",
+    },
+    reportYearRadioDot: {
+        width: 10,
+        height: 10,
+        borderRadius: 5,
+        backgroundColor: "#2563EB",
+    },
+    reportYearOptionText: {
+        flex: 1,
+        minWidth: 0,
+        paddingHorizontal: 12,
+    },
+    reportYearModalFooter: {
+        flexDirection: "row",
+        paddingTop: 16,
     },
     versionRecordModalPanel: {
         width: "100%",
@@ -1899,6 +2090,19 @@ const styles = StyleSheet.create({
     },
     backupProgressIconCompleted: {
         backgroundColor: "#DCFCE7",
+    },
+    backupProgressSpinner: {
+        width: 36,
+        height: 36,
+        alignItems: "center",
+        justifyContent: "center",
+    },
+    backupProgressMessageArea: {
+        width: "100%",
+        height: 50,
+        marginTop: 8,
+        alignItems: "center",
+        justifyContent: "center",
     },
     backupProgressTrack: {
         width: "100%",

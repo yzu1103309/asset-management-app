@@ -1,4 +1,20 @@
-import {Alert, Animated, FlatList, Keyboard, RefreshControl, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View} from "react-native";
+import {
+    Alert,
+    Animated,
+    Easing,
+    FlatList,
+    Keyboard,
+    type NativeScrollEvent,
+    type NativeSyntheticEvent,
+    Platform,
+    RefreshControl,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    useWindowDimensions,
+    View,
+} from "react-native";
 import ExpoSegmentedControl from "@expo/ui/community/segmented-control";
 import {useCallback, useDeferredValue, useEffect, useMemo, useRef, useState} from "react";
 import {useSafeAreaInsets} from "react-native-safe-area-context";
@@ -11,7 +27,7 @@ import {
     type AnnualPropertyListItem,
 } from "@/handlers/propertyList";
 import type {PropertyStatus} from "@/handlers/propertyStatusStore";
-import {searchPropertyItems} from "@/handlers/propertySearch";
+import {filterPropertyItemsByTags, searchPropertyItems} from "@/handlers/propertySearch";
 import {useSpinner} from "@/context/SpinnerContext";
 import PropertyYearDropdown from "@/components/PropertyYearDropdown";
 import {usePropertyYear} from "@/context/PropertyYearContext";
@@ -23,15 +39,95 @@ import {
     type AreaLayout,
     type AreaLayoutArea,
 } from "@/handlers/areaLayout";
+import {getVisiblePropertyTagCategories, mergePropertyTagCategories} from "@/handlers/propertyTagging";
 
 const STATUS_BY_INDEX: PropertyStatus[] = ["unknown", "checked", "pending"];
 const SEGMENT_VALUES = ["未清點", "已確認", "待處理"];
+const AREA_SEARCH_INPUT_HEADER_HEIGHT = 56;
+const AREA_TAG_FILTER_HEIGHT = 42;
 
 function itemIsInArea(item: AnnualPropertyListItem, area: AreaLayoutArea): boolean {
     if (item.location?.areaId === area.id) return true;
 
     const areaName = area.name.trim();
     return Boolean(areaName) && item.location?.areaName?.trim() === areaName;
+}
+
+function PropertyTagFilter({
+    tags,
+    selectedTags,
+    show,
+    embedded = false,
+    onToggle,
+}: {
+    tags: string[];
+    selectedTags: string[];
+    show: boolean;
+    embedded?: boolean;
+    onToggle: (tag: string) => void;
+}) {
+    const visible = show && tags.length > 0;
+    const [visibility] = useState(() => new Animated.Value(visible ? 1 : 0));
+    const selectedTagSet = new Set(selectedTags);
+
+    useEffect(() => {
+        const animation = Animated.timing(visibility, {
+            toValue: visible ? 1 : 0,
+            duration: embedded ? 320 : visible ? 190 : 160,
+            easing: Easing.out(Easing.cubic),
+            isInteraction: false,
+            useNativeDriver: false,
+        });
+        animation.start();
+
+        return () => animation.stop();
+    }, [embedded, visibility, visible]);
+
+    return (
+        <Animated.View
+            pointerEvents={visible ? "auto" : "none"}
+            style={{
+                opacity: visibility,
+                maxHeight: visibility.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [0, embedded ? AREA_TAG_FILTER_HEIGHT : 40],
+                }),
+                overflow: "hidden",
+            }}
+        >
+            <View style={[styles.tagFilterRow, embedded && styles.tagFilterRowEmbedded]}>
+                <View style={styles.tagFilterLabel}>
+                    <Icon name="tag" fontFamily="Feather" color="gray500" fontSize="sm" />
+                    <Text style={styles.tagFilterLabelText}>分類</Text>
+                </View>
+                <ScrollView
+                    horizontal
+                    style={styles.tagFilterScroll}
+                    showsHorizontalScrollIndicator={false}
+                    keyboardShouldPersistTaps="always"
+                    contentContainerStyle={styles.tagFilterContent}
+                >
+                    {tags.map((tag) => {
+                        const selected = selectedTagSet.has(tag);
+                        return (
+                            <TouchableOpacity
+                                key={tag}
+                                activeOpacity={0.75}
+                                accessibilityRole="checkbox"
+                                accessibilityState={{checked: selected}}
+                                onPress={() => onToggle(tag)}
+                                style={[styles.tagFilterChip, selected && styles.tagFilterChipSelected]}
+                            >
+                                <Text style={[styles.tagFilterChipText, selected && styles.tagFilterChipTextSelected]}>
+                                    # {tag}
+                                </Text>
+                            </TouchableOpacity>
+                        );
+                    })}
+                </ScrollView>
+            </View>
+        </Animated.View>
+    );
 }
 
 function AreaLayoutOverview({
@@ -138,6 +234,7 @@ export default function I()
     const params = useLocalSearchParams();
     const select = params.select != null ? Number(params.select) : undefined;
     const insets = useSafeAreaInsets()
+    const {height: windowHeight} = useWindowDimensions();
     const {showSpinner, hideSpinner} = useSpinner();
     const {selectedYear, refreshYears} = usePropertyYear();
     const [selected, setSelected] = useState(0);
@@ -154,15 +251,42 @@ export default function I()
     const [refreshing, setRefreshing] = useState(false);
     const [input, setInput] = useState("");
     const [focusedInput, setFocusedInput] = useState(false);
+    const [selectedListTags, setSelectedListTags] = useState<string[]>([]);
+    const [areaInput, setAreaInput] = useState("");
+    const [areaSearchFocused, setAreaSearchFocused] = useState(false);
+    const [selectedAreaTags, setSelectedAreaTags] = useState<string[]>([]);
     const refreshRequestRef = useRef(0);
+    const areaListRef = useRef<FlatList<AnnualPropertyListItem>>(null);
+    const areaListOffsetRef = useRef(0);
     const viewModeOpacity = useRef(new Animated.Value(1)).current;
     const viewModeTranslateY = useRef(new Animated.Value(0)).current;
     const shouldAnimateContentInRef = useRef(false);
     const areaItemsOpacity = useRef(new Animated.Value(1)).current;
     const areaItemsTranslateY = useRef(new Animated.Value(0)).current;
+    const [areaPreviewVisibility] = useState(() => new Animated.Value(1));
+    const [areaTagFilterVisibility] = useState(() => new Animated.Value(0));
     const shouldAnimateAreaItemsInRef = useRef(false);
     const deferredInput = useDeferredValue(input);
-    const visibleItems = useMemo(() => sortAnnualPropertyListItems(searchPropertyItems(deferredInput, items)), [deferredInput, items]);
+    const deferredAreaInput = useDeferredValue(areaInput);
+    const allListTagCategories = useMemo(() => mergePropertyTagCategories(
+        items.flatMap((item) => item.tags ?? []),
+    ), [items]);
+    const activeSelectedListTags = useMemo(() => (
+        selectedListTags.filter((tag) => allListTagCategories.includes(tag))
+    ), [allListTagCategories, selectedListTags]);
+    const tagFilteredItems = useMemo(() => (
+        filterPropertyItemsByTags(items, activeSelectedListTags)
+    ), [activeSelectedListTags, items]);
+    const listTagCategories = useMemo(() => mergePropertyTagCategories(
+        activeSelectedListTags,
+        tagFilteredItems.flatMap((item) => item.tags ?? []),
+    ), [activeSelectedListTags, tagFilteredItems]);
+    const visibleListTagCategories = useMemo(() => (
+        getVisiblePropertyTagCategories(listTagCategories, activeSelectedListTags, deferredInput)
+    ), [activeSelectedListTags, deferredInput, listTagCategories]);
+    const visibleItems = useMemo(() => (
+        searchPropertyItems(deferredInput, tagFilteredItems)
+    ), [deferredInput, tagFilteredItems]);
     const selectedArea = useMemo(
         () => areaLayout?.areas.find((area) => area.id === selectedAreaId) ?? null,
         [areaLayout, selectedAreaId],
@@ -174,7 +298,36 @@ export default function I()
     const selectedAreaItems = useMemo(() => displayedArea
         ? sortAnnualPropertyListItems(areaItems.filter((item) => itemIsInArea(item, displayedArea)))
         : [], [areaItems, displayedArea]);
-    const searchPlaceholder = `在「${SEGMENT_VALUES[selected] ?? "清單"}」中搜尋（財產編號、品名、項次）`;
+    const allAreaTagCategories = useMemo(() => mergePropertyTagCategories(
+        selectedAreaItems.flatMap((item) => item.tags ?? []),
+    ), [selectedAreaItems]);
+    const activeSelectedAreaTags = useMemo(() => (
+        selectedAreaTags.filter((tag) => allAreaTagCategories.includes(tag))
+    ), [allAreaTagCategories, selectedAreaTags]);
+    const tagFilteredAreaItems = useMemo(() => (
+        filterPropertyItemsByTags(selectedAreaItems, activeSelectedAreaTags)
+    ), [activeSelectedAreaTags, selectedAreaItems]);
+    const areaTagCategories = useMemo(() => mergePropertyTagCategories(
+        activeSelectedAreaTags,
+        tagFilteredAreaItems.flatMap((item) => item.tags ?? []),
+    ), [activeSelectedAreaTags, tagFilteredAreaItems]);
+    const visibleAreaTagCategories = useMemo(() => (
+        getVisiblePropertyTagCategories(areaTagCategories, activeSelectedAreaTags, deferredAreaInput)
+    ), [activeSelectedAreaTags, areaTagCategories, deferredAreaInput]);
+    const areaTagFiltersVisible = areaTagCategories.length > 0 && visibleAreaTagCategories.length > 0;
+    const visibleAreaItems = useMemo(() => (
+        searchPropertyItems(deferredAreaInput, tagFilteredAreaItems)
+    ), [deferredAreaInput, tagFilteredAreaItems]);
+    const areaSearchHeaderHeight = AREA_SEARCH_INPUT_HEADER_HEIGHT
+        + (areaTagCategories.length > 0 ? AREA_TAG_FILTER_HEIGHT : 0);
+    const areaSearchHiddenOffset = areaSearchHeaderHeight + 2;
+    const areaListInitialContentOffset = useMemo(() => ({
+        x: 0,
+        y: selectedArea ? areaSearchHiddenOffset : 0,
+    }), [areaSearchHiddenOffset, selectedArea]);
+    const areaPreviewMaxHeight = Math.max(windowHeight * 0.55, 320);
+    const listSearchPlaceholder = `在「${SEGMENT_VALUES[selected] ?? "清單"}」搜尋（編號、品名、備註、分類等）`;
+    const areaSearchPlaceholder = `在「${selectedArea?.name?.trim() || "未命名區域"}」搜尋（編號、品名、備註、分類等）`;
 
     useEffect(() => {
         if (select !== undefined && select >= 0 && select < STATUS_BY_INDEX.length) {
@@ -217,6 +370,28 @@ export default function I()
             }),
         ]).start(() => setAreaItemsTransitioning(false));
     }, [areaItemsOpacity, areaItemsTranslateY, displayedAreaId]);
+
+    useEffect(() => {
+        Animated.timing(areaPreviewVisibility, {
+            toValue: areaSearchFocused ? 0 : 1,
+            duration: 500,
+            easing: Easing.inOut(Easing.cubic),
+            useNativeDriver: false,
+        }).start();
+    }, [areaPreviewVisibility, areaSearchFocused]);
+
+    useEffect(() => {
+        const animation = Animated.timing(areaTagFilterVisibility, {
+            toValue: areaTagFiltersVisible ? 1 : 0,
+            duration: 320,
+            easing: Easing.out(Easing.cubic),
+            isInteraction: false,
+            useNativeDriver: false,
+        });
+        animation.start();
+
+        return () => animation.stop();
+    }, [areaTagFilterVisibility, areaTagFiltersVisible]);
 
     useEffect(() => {
         const selectedAreaStillExists = areaLayout?.areas.some((area) => area.id === selectedAreaId) ?? false;
@@ -285,6 +460,7 @@ export default function I()
         setItems([]);
         setAreaItems([]);
         setLoading(true);
+        setSelectedListTags([]);
         setSelected(index);
         router.setParams({ select: String(index) });
     };
@@ -295,6 +471,8 @@ export default function I()
         setItems([]);
         setAreaItems([]);
         setLoading(true);
+        setSelectedListTags([]);
+        setSelectedAreaTags([]);
         void refresh(false, year, true);
     }, [refresh, showSpinner]);
 
@@ -303,6 +481,52 @@ export default function I()
         Keyboard.dismiss();
     };
 
+    const toggleListTag = useCallback((tag: string) => {
+        const selecting = !selectedListTags.includes(tag);
+        setSelectedListTags((current) => (
+            current.includes(tag) ? current.filter((value) => value !== tag) : [...current, tag]
+        ));
+        if (selecting) setInput("");
+    }, [selectedListTags]);
+
+    const toggleAreaTag = useCallback((tag: string) => {
+        const selecting = !selectedAreaTags.includes(tag);
+        setSelectedAreaTags((current) => (
+            current.includes(tag) ? current.filter((value) => value !== tag) : [...current, tag]
+        ));
+        if (selecting) setAreaInput("");
+    }, [selectedAreaTags]);
+
+    const hideAreaSearch = useCallback((animated: boolean) => {
+        areaListOffsetRef.current = areaSearchHiddenOffset;
+        areaListRef.current?.scrollToOffset({offset: areaSearchHiddenOffset, animated});
+    }, [areaSearchHiddenOffset]);
+
+    const handleAreaSearchClear = () => {
+        setAreaInput("");
+        setAreaSearchFocused(false);
+        Keyboard.dismiss();
+        requestAnimationFrame(() => hideAreaSearch(true));
+    };
+
+    const handleAreaListScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+        areaListOffsetRef.current = event.nativeEvent.contentOffset.y;
+    }, []);
+
+    useEffect(() => {
+        const frame = requestAnimationFrame(() => {
+            if (selectedAreaId) {
+                hideAreaSearch(false);
+                return;
+            }
+
+            areaListOffsetRef.current = 0;
+            areaListRef.current?.scrollToOffset({offset: 0, animated: false});
+        });
+
+        return () => cancelAnimationFrame(frame);
+    }, [hideAreaSearch, selectedAreaId]);
+
     const renderItem = useCallback(({item}: {item: AnnualPropertyListItem}) => (
         <ItemCard
             itemNumber={item.itemNumber}
@@ -310,6 +534,7 @@ export default function I()
             propertyName={item.propertyName}
             location={item.location}
             note={item.note}
+            tags={item.tags}
             status={item.status}
             onPress={() => {
                 router.push({
@@ -338,6 +563,10 @@ export default function I()
         if (areaItemsTransitioning) return;
 
         const nextAreaId = selectedAreaId === areaId ? null : areaId;
+        setAreaInput("");
+        setSelectedAreaTags([]);
+        setAreaSearchFocused(false);
+        Keyboard.dismiss();
         setSelectedAreaId(nextAreaId);
         setAreaItemsTransitioning(true);
         Animated.sequence([
@@ -373,6 +602,10 @@ export default function I()
 
         setViewModeTransitioning(true);
         const nextViewMode = viewMode === "list" ? "area" : "list";
+        if (nextViewMode === "list") {
+            setAreaSearchFocused(false);
+            Keyboard.dismiss();
+        }
         setViewMode(nextViewMode);
         Animated.sequence([
             Animated.delay(90),
@@ -399,9 +632,15 @@ export default function I()
 
             shouldAnimateContentInRef.current = true;
             viewModeTranslateY.setValue(8);
+            if (nextViewMode === "area") {
+                setAreaSearchFocused(false);
+                areaPreviewVisibility.stopAnimation();
+                areaPreviewVisibility.setValue(1);
+                Keyboard.dismiss();
+            }
             setContentViewMode(nextViewMode);
         });
-    }, [contentViewMode, viewMode, viewModeOpacity, viewModeTransitioning, viewModeTranslateY]);
+    }, [areaPreviewVisibility, contentViewMode, viewMode, viewModeOpacity, viewModeTransitioning, viewModeTranslateY]);
 
     return (
         <View style={[styles.container, {paddingTop: insets.top + 15  }]}>
@@ -450,7 +689,7 @@ export default function I()
                             onChange={(e) => setInput(e.nativeEvent.text)}
                             rounded="circle"
                             borderWidth={1.5}
-                            placeholder={searchPlaceholder}
+                            placeholder={listSearchPlaceholder}
                             onFocus={() => setFocusedInput(true)}
                             onBlur={() => setFocusedInput(false)}
                             suffix={
@@ -465,6 +704,14 @@ export default function I()
                         />
                     </Div>
                 )}
+                {contentViewMode === "list" && listTagCategories.length > 0 && (
+                    <PropertyTagFilter
+                        tags={visibleListTagCategories}
+                        selectedTags={activeSelectedListTags}
+                        show
+                        onToggle={toggleListTag}
+                    />
+                )}
                 {contentViewMode === "list" ? (
                     <FlatList
                         key="property-list"
@@ -472,40 +719,126 @@ export default function I()
                         keyExtractor={(item) => `${item.barcode}:${item.entityIndex}`}
                         renderItem={renderItem}
                         showsVerticalScrollIndicator={false}
+                        automaticallyAdjustKeyboardInsets
+                        keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+                        keyboardShouldPersistTaps="handled"
                         contentContainerStyle={[styles.listContent, visibleItems.length === 0 && styles.emptyListContent]}
                         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { void refresh(true); }} />}
                         ListEmptyComponent={(
                             <View style={styles.emptyState}>
                                 <Text style={styles.emptyText}>
-                                    {loading ? "讀取中..." : input.trim() ? "沒有符合搜尋條件的財產資料" : "沒有符合此狀態的財產資料"}
+                                    {loading
+                                        ? "讀取中..."
+                                        : input.trim() || activeSelectedListTags.length > 0
+                                            ? "沒有符合搜尋或分類篩選條件的財產資料"
+                                            : "沒有符合此狀態的財產資料"}
                                 </Text>
                             </View>
                         )}
                     />
                 ) : (
                     <>
-                        <AreaLayoutOverview
-                            layout={areaLayout}
-                            items={areaItems}
-                            selectedAreaId={selectedAreaId}
-                            disabled={areaItemsTransitioning}
-                            onSelectArea={handleSelectArea}
-                        />
+                        <Animated.View
+                            pointerEvents={areaSearchFocused ? "none" : "auto"}
+                            style={[
+                                styles.areaPreviewAnimatedContainer,
+                                {
+                                    opacity: areaPreviewVisibility,
+                                    maxHeight: areaPreviewVisibility.interpolate({
+                                        inputRange: [0, 1],
+                                        outputRange: [0, areaPreviewMaxHeight],
+                                    }),
+                                },
+                            ]}
+                        >
+                            <AreaLayoutOverview
+                                layout={areaLayout}
+                                items={areaItems}
+                                selectedAreaId={selectedAreaId}
+                                disabled={areaItemsTransitioning}
+                                onSelectArea={handleSelectArea}
+                            />
+                        </Animated.View>
                         <Text style={styles.selectedAreaTitle}>
                             {selectedArea ? `「${selectedArea.name || "未命名區域"}」的財產` : "請點擊選取想查看區域"}
                         </Text>
                         <FlatList
                             key="area-layout-list"
-                            data={selectedAreaItems}
+                            ref={areaListRef}
+                            data={visibleAreaItems}
                             keyExtractor={(item) => `${item.barcode}:${item.entityIndex}`}
                             renderItem={renderAreaItem}
                             showsVerticalScrollIndicator={false}
-                            contentContainerStyle={[styles.areaListContent, selectedAreaItems.length === 0 && styles.areaEmptyListContent]}
+                            alwaysBounceVertical
+                            automaticallyAdjustKeyboardInsets
+                            keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+                            keyboardShouldPersistTaps="handled"
+                            scrollEventThrottle={16}
+                            onScroll={handleAreaListScroll}
+                            contentOffset={areaListInitialContentOffset}
+                            contentContainerStyle={[styles.areaListContent, visibleAreaItems.length === 0 && styles.areaEmptyListContent]}
                             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { void refresh(true); }} />}
+                            ListHeaderComponent={selectedArea ? (
+                                <Animated.View
+                                    style={[
+                                        styles.areaSearchHeader,
+                                        {
+                                            height: areaTagFilterVisibility.interpolate({
+                                                inputRange: [0, 1],
+                                                outputRange: [AREA_SEARCH_INPUT_HEADER_HEIGHT, areaSearchHeaderHeight],
+                                            }),
+                                        },
+                                    ]}
+                                >
+                                    <Input
+                                        value={areaInput}
+                                        onChangeText={setAreaInput}
+                                        focusBorderColor="blue400"
+                                        hitSlop={10}
+                                        px="lg"
+                                        pl={18}
+                                        fontSize="md"
+                                        rounded="circle"
+                                        borderWidth={1.5}
+                                        placeholder={areaSearchPlaceholder}
+                                        onFocus={() => setAreaSearchFocused(true)}
+                                        onBlur={() => {
+                                            setAreaSearchFocused(false);
+                                            if (!areaInput.trim() && areaListOffsetRef.current < areaSearchHiddenOffset) {
+                                                hideAreaSearch(true);
+                                            }
+                                        }}
+                                        suffix={areaSearchFocused || areaInput.length > 0 ? (
+                                            <TouchableOpacity onPress={handleAreaSearchClear} hitSlop={{top: 10, bottom: 10, left: 10, right: 10}}>
+                                                <Icon name="close-circle" color="gray500" fontSize="xl" fontFamily="Ionicons" mx="sm" />
+                                            </TouchableOpacity>
+                                        ) : (
+                                            <Icon mx="xs" mb={2} name="search" color="gray500" fontSize="md" fontFamily="FontAwesome" />
+                                        )}
+                                    />
+                                    {areaTagCategories.length > 0 && (
+                                        <PropertyTagFilter
+                                            tags={visibleAreaTagCategories}
+                                            selectedTags={activeSelectedAreaTags}
+                                            show
+                                            embedded
+                                            onToggle={toggleAreaTag}
+                                        />
+                                    )}
+                                </Animated.View>
+                            ) : null}
                             ListEmptyComponent={(
                                 <Animated.View style={[styles.areaItemsEmptyState, {opacity: areaItemsOpacity, transform: [{translateY: areaItemsTranslateY}]}]}>
                                     <Text style={styles.emptyText}>
-                                        {loading ? "讀取中..." : selectedArea ? "此區域目前沒有放置財產" : "點選配置圖中的區域，\n即可查看放置在該處的財產"}
+                                        {loading
+                                            ? "讀取中..."
+                                            : areaInput.trim()
+                                                ? "此區域找不到符合搜尋條件的財產"
+                                                : activeSelectedAreaTags.length > 0
+                                                    ? "此區域沒有符合分類篩選條件的財產"
+                                                : selectedArea
+                                                    ? "此區域目前沒有放置財產"
+                                                    : "點選配置圖中的區域，\n即可查看放置在該處的財產"}
                                     </Text>
                                 </Animated.View>
                             )}
@@ -552,6 +885,58 @@ const styles = StyleSheet.create({
     viewModeContent: {
         flex: 1,
     },
+    tagFilterRow: {
+        minHeight: 34,
+        marginBottom: 6,
+        flexDirection: "row",
+        alignItems: "center",
+    },
+    tagFilterRowEmbedded: {
+        marginTop: 8,
+        marginBottom: 0,
+    },
+    tagFilterLabel: {
+        flexShrink: 0,
+        marginRight: 8,
+        marginLeft: 10,
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 5,
+    },
+    tagFilterLabelText: {
+        color: "#667085",
+        fontSize: 12,
+        fontWeight: "600",
+    },
+    tagFilterContent: {
+        paddingRight: 6,
+        gap: 7,
+    },
+    tagFilterScroll: {
+        flex: 1,
+    },
+    tagFilterChip: {
+        minHeight: 30,
+        paddingHorizontal: 10,
+        alignItems: "center",
+        justifyContent: "center",
+        borderRadius: 999,
+        backgroundColor: "#F8FAFC",
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: "#CBD5E1",
+    },
+    tagFilterChipSelected: {
+        backgroundColor: "#EFF6FF",
+        borderColor: "#60A5FA",
+    },
+    tagFilterChipText: {
+        color: "#667085",
+        fontSize: 12,
+    },
+    tagFilterChipTextSelected: {
+        color: "#1D4ED8",
+        fontWeight: "700",
+    },
     listContent: {
         paddingTop: 5,
         paddingBottom: 28,
@@ -579,6 +964,9 @@ const styles = StyleSheet.create({
     areaLayoutSection: {
         marginTop: 6,
         marginBottom: 18,
+    },
+    areaPreviewAnimatedContainer: {
+        overflow: "hidden",
     },
     areaLayoutHint: {
         marginBottom: 9,
@@ -639,6 +1027,11 @@ const styles = StyleSheet.create({
         fontSize: 16,
         fontWeight: "700",
         textAlign: "center",
+    },
+    areaSearchHeader: {
+        paddingHorizontal: 3,
+        paddingBottom: 12,
+        backgroundColor: "white",
     },
     areaItemsEmptyState: {
         minHeight: 120,

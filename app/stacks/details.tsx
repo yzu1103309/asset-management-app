@@ -1,10 +1,11 @@
-import {useCallback, useEffect, useMemo, useRef, useState} from "react";
+import {useCallback, useDeferredValue, useEffect, useMemo, useRef, useState} from "react";
 import {
     ActivityIndicator,
     Alert,
     Animated,
     Easing,
     FlatList,
+    Keyboard,
     KeyboardAvoidingView,
     type LayoutChangeEvent,
     Modal,
@@ -27,7 +28,11 @@ import {Gesture, GestureDetector, GestureHandlerRootView} from "react-native-ges
 import Reanimated, {useAnimatedStyle, useSharedValue, withSpring} from "react-native-reanimated";
 import {useSafeAreaInsets} from "react-native-safe-area-context";
 import {Button, Div, Icon, Input, Text} from "react-native-magnus";
-import {getPropertyItemsByBarcodeMatch} from "@/handlers/propertyList";
+import {
+    getPropertyItemsByBarcodeMatch,
+    sortAnnualPropertyListItems,
+    type AnnualPropertyListItem,
+} from "@/handlers/propertyList";
 import type {PropertyItem} from "@/handlers/propertyImport";
 import {
     getPropertyEntityKey,
@@ -96,6 +101,25 @@ import {
     setPropertyItemParent,
     type PropertyRelationshipTarget,
 } from "@/handlers/propertyRelationships";
+import {filterPropertyItemsByTags, searchPropertyItems} from "@/handlers/propertySearch";
+import {
+    getRecentPropertyEntityKeys,
+    rememberRecentPropertyEntity,
+} from "@/handlers/recentPropertyViews";
+import {
+    filterPropertyTagCategories,
+    getPropertyTagsForCard,
+    getStoredPropertyTagCategories,
+    getVisiblePropertyTagCategories,
+    MAX_PROPERTY_TAG_COUNT,
+    MAX_PROPERTY_TAG_LENGTH,
+    mergePropertyTagCategories,
+    normalizePropertyTag,
+    propertyItemHasTag,
+    pruneUnusedPropertyTagCategories,
+    setPropertyItemTagSelected,
+} from "@/handlers/propertyTagging";
+import PropertyTagFilterBar from "@/components/PropertyTagFilterBar";
 
 function getParamValue(value: string | string[] | undefined): string | undefined {
     return Array.isArray(value) ? value[0] : value;
@@ -131,6 +155,20 @@ const PROPERTY_STATUS_LABELS: Record<PropertyStatus, string> = {
     unknown: "未清點",
     checked: "已確認",
     pending: "待處理",
+};
+
+const PROPERTY_STATUS_ICONS: Record<PropertyStatus, string> = {
+    unknown: "help",
+    checked: "checkmark-done",
+    pending: "warning-outline",
+};
+
+const PROPERTY_STATUS_LOADING_COLORS = {
+    cardBg: "#F1F5F9",
+    numberBg: "#E2E8F0",
+    numberColor: "#64748B",
+    barcodeColor: "#475569",
+    nameColor: "#64748B",
 };
 
 function getPropertyRelationshipShortLabel(target: PropertyRelationshipTarget | null, fallbackKey?: string | null): string {
@@ -189,6 +227,39 @@ function EditableDetailRow({
         <TouchableOpacity activeOpacity={0.75} onPress={onPress} style={[styles.detailRow, styles.editableDetailRow]}>
             {content}
             <Icon name="edit-2" fontFamily="Feather" fontSize="lg" color="gray500" ml="sm" />
+        </TouchableOpacity>
+    );
+}
+
+function PropertyTaggingRow({
+    tags,
+    onPress,
+}: {
+    tags: string[] | undefined;
+    onPress: () => void;
+}) {
+    const visibleTags = mergePropertyTagCategories(tags ?? []);
+
+    return (
+        <TouchableOpacity activeOpacity={0.75} onPress={onPress} style={[styles.detailRow, styles.taggingDetailRow]}>
+            <View style={styles.editableDetailText}>
+                <Text fontSize="md" color="gray600" style={styles.detailLabel}>
+                    分類標記（{visibleTags.length} / {MAX_PROPERTY_TAG_COUNT}）
+                </Text>
+                {visibleTags.length > 0 ? (
+                    <View style={styles.propertyTagChipList}>
+                        {visibleTags.map((tag) => (
+                            <View key={tag} style={styles.propertyTagChip}>
+                                <Icon name="hash" fontFamily="Feather" color="green700" fontSize="sm" mr={3} />
+                                <Text color="green800" fontSize="sm" fontWeight="bold">{tag}</Text>
+                            </View>
+                        ))}
+                    </View>
+                ) : (
+                    <Text fontSize="lg" color="gray900" style={styles.detailValue}>（尚未加入）</Text>
+                )}
+            </View>
+            <Icon name="plus-circle" fontFamily="Feather" fontSize="xl" color="green600" ml="sm" />
         </TouchableOpacity>
     );
 }
@@ -687,6 +758,231 @@ function DetailTextEditModal({
                             </Button>
                         </>
                     )}
+                </View>
+            </KeyboardAvoidingView>
+        </Modal>
+    );
+}
+
+function PropertyTaggingModal({
+    item,
+    categories,
+    loading,
+    savingTag,
+    onClose,
+    onSetTagSelected,
+}: {
+    item: PropertyItem | null;
+    categories: string[];
+    loading: boolean;
+    savingTag: string | null;
+    onClose: () => void;
+    onSetTagSelected: (tag: string, selected: boolean, created?: boolean) => void | Promise<void>;
+}) {
+    const [query, setQuery] = useState("");
+    const [retainedItem, setRetainedItem] = useState<PropertyItem | null>(item);
+    const visible = item !== null;
+    const displayItem = item ?? retainedItem;
+    const normalizedQuery = normalizePropertyTag(query);
+    const selectedCategories = useMemo(
+        () => mergePropertyTagCategories(displayItem?.tags ?? []),
+        [displayItem?.tags],
+    );
+    const filteredAvailableCategories = useMemo(
+        () => filterPropertyTagCategories(categories, query).filter(
+            (category) => !propertyItemHasTag(selectedCategories, category),
+        ),
+        [categories, query, selectedCategories],
+    );
+    const exactCategoryExists = categories.some((category) => propertyItemHasTag([category], normalizedQuery));
+    const selectedTagCount = selectedCategories.length;
+    const selectionLimitReached = selectedTagCount >= MAX_PROPERTY_TAG_COUNT;
+    const canCreateCategory = !!normalizedQuery && !exactCategoryExists && !selectionLimitReached;
+
+    useEffect(() => {
+        if (item) setRetainedItem(item);
+    }, [item]);
+
+    const closeModal = () => {
+        if (savingTag) return;
+        Keyboard.dismiss();
+        onClose();
+    };
+    const createAndApplyCategory = () => {
+        if (!canCreateCategory || savingTag) return;
+        void onSetTagSelected(normalizedQuery, true, true);
+        setQuery("");
+    };
+    const setCategorySelected = (category: string, selected: boolean) => {
+        if (selected && selectionLimitReached) {
+            Alert.alert(
+                "已達分類標記上限",
+                `每項財產最多只能加入 ${MAX_PROPERTY_TAG_COUNT} 個分類標記。`,
+            );
+            return;
+        }
+
+        if (selected && selectedTagCount + 1 >= MAX_PROPERTY_TAG_COUNT) setQuery("");
+        void onSetTagSelected(category, selected);
+    };
+    const renderCategoryRow = (category: string, selected: boolean) => {
+        const saving = savingTag !== null && propertyItemHasTag([savingTag], category);
+
+        return (
+            <TouchableOpacity
+                key={category}
+                activeOpacity={0.78}
+                disabled={!!savingTag}
+                onPress={() => setCategorySelected(category, !selected)}
+                style={[
+                    styles.taggingCategoryRow,
+                    selected && styles.taggingCategoryRowSelected,
+                ]}
+            >
+                <View style={styles.taggingCategoryText}>
+                    <Text color={selected ? "green800" : "gray800"} fontSize="md" fontWeight="bold" numberOfLines={1}>
+                        {category}
+                    </Text>
+                    {saving && <Text mt={2} color="gray500" fontSize="xs">儲存中...</Text>}
+                </View>
+                <Icon
+                    name={selected ? "check-circle" : "plus-circle"}
+                    fontFamily="Feather"
+                    color={selected ? "green600" : "gray500"}
+                    fontSize="xl"
+                />
+            </TouchableOpacity>
+        );
+    };
+    const renderSelectedCategorySection = (belowSearchResults = false) => (
+        <View style={belowSearchResults && styles.taggingSelectedSectionBelow}>
+            <View style={styles.taggingSectionHeader}>
+                <Text color="gray700" fontSize="sm" fontWeight="bold">已選取的分類</Text>
+                <Text color="gray500" fontSize="xs">{selectedTagCount} / {MAX_PROPERTY_TAG_COUNT}</Text>
+            </View>
+            {selectedCategories.length > 0 ? (
+                selectedCategories.map((category) => renderCategoryRow(category, true))
+            ) : (
+                <Text color="gray500" fontSize="sm" style={styles.taggingSelectedEmpty}>尚未選取分類</Text>
+            )}
+        </View>
+    );
+    return (
+        <Modal
+            visible={visible}
+            transparent
+            animationType="fade"
+            onShow={() => setQuery("")}
+            onRequestClose={closeModal}
+        >
+            <KeyboardAvoidingView
+                behavior={Platform.OS === "ios" ? "padding" : undefined}
+                style={styles.modalOverlay}
+            >
+                <View style={[styles.modalInnerContainer, styles.taggingModalContainer]}>
+                    <View style={styles.modalHeaderRow}>
+                        <View style={styles.modalHeaderTitle}>
+                            <Text fontSize="xl" color="gray800" fontWeight="bold">
+                                分類標記
+                            </Text>
+                            {/*<Text mt={3} fontSize="sm" color="gray500">用自訂分類整理財產，不影響財產標籤列印。</Text>*/}
+                        </View>
+                        <TouchableOpacity onPress={closeModal} hitSlop={hitSlop} disabled={!!savingTag}>
+                            <Icon name="x" fontFamily="Feather" color="gray700" fontSize="2xl" />
+                        </TouchableOpacity>
+                    </View>
+
+                    {!selectionLimitReached && (
+                        <Input
+                            mt="lg"
+                            value={query}
+                            onChangeText={(value) => setQuery(Array.from(value).slice(0, MAX_PROPERTY_TAG_LENGTH).join(""))}
+                            focusBorderColor="blue400"
+                            px="lg"
+                            pl={18}
+                            fontSize="md"
+                            rounded="circle"
+                            borderWidth={1.5}
+                            autoCapitalize="none"
+                            returnKeyType={canCreateCategory ? "done" : "search"}
+                            onSubmitEditing={createAndApplyCategory}
+                            placeholder="搜尋或新增分類標記"
+                            suffix={query.length > 0 ? (
+                                <TouchableOpacity onPress={() => setQuery("")} hitSlop={hitSlop}>
+                                    <Icon name="close-circle" color="gray500" fontSize="xl" fontFamily="Ionicons" mx="sm" />
+                                </TouchableOpacity>
+                            ) : (
+                                <Icon mx="xs" mb={2} name="search" color="gray500" fontSize="md" fontFamily="FontAwesome" />
+                            )}
+                        />
+                    )}
+
+                    {canCreateCategory && (
+                        <TouchableOpacity
+                            activeOpacity={0.78}
+                            disabled={!!savingTag}
+                            onPress={createAndApplyCategory}
+                            style={styles.taggingCreateButton}
+                        >
+                            <Icon name="plus" fontFamily="Feather" color="blue600" fontSize="lg" mr="sm" />
+                            <Text color="blue700" fontSize="md" fontWeight="bold" numberOfLines={1}>
+                                建立並套用「{normalizedQuery}」
+                            </Text>
+                        </TouchableOpacity>
+                    )}
+
+                    <FlatList
+                        data={filteredAvailableCategories}
+                        keyExtractor={(category) => category}
+                        keyboardShouldPersistTaps="handled"
+                        showsVerticalScrollIndicator={false}
+                        style={styles.taggingCategoryList}
+                        contentContainerStyle={filteredAvailableCategories.length === 0 && selectedCategories.length === 0
+                            ? styles.taggingCategoryEmptyContent
+                            : styles.taggingCategoryListContent}
+                        renderItem={({item: category}) => renderCategoryRow(category, false)}
+                        ListHeaderComponent={normalizedQuery ? (
+                            <View style={styles.taggingSectionHeader}>
+                                <Text color="gray700" fontSize="sm" fontWeight="bold">符合搜尋的分類</Text>
+                            </View>
+                        ) : (
+                            <View>
+                                {renderSelectedCategorySection()}
+                                {filteredAvailableCategories.length > 0 && (
+                                    <View style={[styles.taggingSectionHeader, styles.taggingAvailableSectionHeader]}>
+                                        <Text color="gray700" fontSize="sm" fontWeight="bold">其他分類</Text>
+                                    </View>
+                                )}
+                            </View>
+                        )}
+                        ListFooterComponent={normalizedQuery ? renderSelectedCategorySection(true) : null}
+                        ListEmptyComponent={(
+                            <View style={selectedCategories.length > 0 ? styles.taggingAvailableEmpty : styles.taggingCategoryEmpty}>
+                                <Text color="gray500" fontSize="md" textAlign="center" lineHeight={24}>
+                                    {loading
+                                        ? "讀取分類標記中..."
+                                        : normalizedQuery
+                                            ? "沒有符合的其他分類標記"
+                                            : selectedCategories.length > 0
+                                                ? "沒有其他可選分類"
+                                                : "尚未建立分類標記\n請直接在上方輸入名稱並建立"}
+                                </Text>
+                            </View>
+                        )}
+                    />
+
+                    <Button
+                        block
+                        bg="gray500"
+                        mt="md"
+                        rounded={15}
+                        fontSize="md"
+                        fontWeight="bold"
+                        disabled={!!savingTag}
+                        onPress={closeModal}
+                    >
+                        完成
+                    </Button>
                 </View>
             </KeyboardAvoidingView>
         </Modal>
@@ -1228,6 +1524,128 @@ type RelationshipPickerState = {
     targets: PropertyRelationshipTarget[];
 };
 
+function PropertyStatusIndicator({
+    status,
+    loading = false,
+}: {
+    status: PropertyStatus | null;
+    loading?: boolean;
+}) {
+    if (!status && !loading) return null;
+
+    if (loading) {
+        return (
+            <View
+                accessible
+                accessibilityRole="progressbar"
+                accessibilityLabel="正在更新盤點狀態"
+                style={[
+                    styles.relationshipStatusIcon,
+                    {backgroundColor: PROPERTY_STATUS_LOADING_COLORS.numberBg},
+                ]}
+            >
+                <Icon
+                    name="ellipsis-horizontal"
+                    fontFamily="Ionicons"
+                    color={PROPERTY_STATUS_LOADING_COLORS.numberColor}
+                    fontSize="lg"
+                />
+            </View>
+        );
+    }
+
+    const resolvedStatus = status as PropertyStatus;
+    return (
+        <View
+            accessible
+            accessibilityRole="image"
+            accessibilityLabel={`盤點狀態：${PROPERTY_STATUS_LABELS[resolvedStatus]}`}
+            style={[
+                styles.relationshipStatusIcon,
+                {backgroundColor: PROPERTY_STATUS_COLORS[resolvedStatus].numberBg},
+            ]}
+        >
+            <Icon
+                name={PROPERTY_STATUS_ICONS[resolvedStatus]}
+                fontFamily="Ionicons"
+                color={PROPERTY_STATUS_COLORS[resolvedStatus].numberColor}
+                fontSize="lg"
+            />
+        </View>
+    );
+}
+
+function RelationshipPropertyMetadata({item}: {item: PropertyItem}) {
+    const locationText = [item.location?.areaName, item.location?.description]
+        .map((value) => value?.trim())
+        .filter((value): value is string => Boolean(value))
+        .join("／");
+    const cardTags = getPropertyTagsForCard(item.tags);
+
+    return (
+        <>
+            {locationText && (
+                <Text mt="xs" color="gray500" fontSize="xs" numberOfLines={1}>
+                    @ {locationText}
+                </Text>
+            )}
+            {cardTags.length > 0 && (
+                <View style={styles.relationshipCandidateTagList}>
+                    {cardTags.map((tag, index) => (
+                        <View key={`${tag}:${index}`} style={styles.relationshipCandidateTagItem}>
+                            <Text
+                                color="gray500"
+                                fontSize="xs"
+                                numberOfLines={1}
+                                style={styles.relationshipCandidateTagText}
+                            >
+                                # {tag}
+                            </Text>
+                        </View>
+                    ))}
+                </View>
+            )}
+        </>
+    );
+}
+
+function RelationshipCandidateCard({
+    target,
+    year,
+    status,
+    statusLoading,
+    recent = false,
+    onPress,
+}: {
+    target: PropertyRelationshipTarget;
+    year: string | null;
+    status: PropertyStatus | null;
+    statusLoading: boolean;
+    recent?: boolean;
+    onPress: () => void;
+}) {
+
+    return (
+        <TouchableOpacity
+            activeOpacity={0.78}
+            onPress={onPress}
+            style={[styles.relationshipCandidateRow, recent && styles.relationshipRecentCard]}
+        >
+            <PropertyStatusIndicator status={status} loading={statusLoading} />
+            <View style={styles.relationshipCandidateText}>
+                <Text color="gray900" fontWeight="bold" fontSize="md" numberOfLines={1}>
+                    {getPropertyItemDisplayNumber(target.item, year)}｜{target.barcode}
+                </Text>
+                <Text mt={3} color="gray600" fontSize="sm" numberOfLines={1}>
+                    {getPropertyItemDisplayName(target.item)}
+                </Text>
+                <RelationshipPropertyMetadata item={target.item} />
+            </View>
+            <Icon name="chevron-right" fontFamily="Feather" color="gray500" fontSize="xl" />
+        </TouchableOpacity>
+    );
+}
+
 function RelationshipPickerModal({
     state,
     year,
@@ -1240,35 +1658,170 @@ function RelationshipPickerModal({
     onSelect: (target: PropertyRelationshipTarget) => void;
 }) {
     const [keyword, setKeyword] = useState("");
+    const [selectedTags, setSelectedTags] = useState<string[]>([]);
+    const [statusesByEntityKey, setStatusesByEntityKey] = useState<Record<string, PropertyStatus>>({});
+    const [recentEntityKeys, setRecentEntityKeys] = useState<string[]>([]);
+    const [resolvedRequestKey, setResolvedRequestKey] = useState<string | null>(null);
+    const [loadError, setLoadError] = useState<string | null>(null);
+    const [loadAttempt, setLoadAttempt] = useState(0);
     const visible = state !== null;
-    const normalizedKeyword = keyword.trim().toLowerCase();
     const pickerTargets = state?.targets;
+    const requestKey = state
+        ? `${state.mode}:${year ?? "all-years"}:${state.targets.map((target) => target.entityKey).join("|")}`
+        : null;
+    const statusesReady = requestKey !== null && resolvedRequestKey === requestKey;
+    const deferredKeyword = useDeferredValue(keyword);
+    const targetByEntityKey = useMemo(() => (
+        new Map((pickerTargets ?? []).map((target) => [target.entityKey, target]))
+    ), [pickerTargets]);
+    const searchableItems = useMemo<AnnualPropertyListItem[]>(() => (
+        sortAnnualPropertyListItems((pickerTargets ?? []).map((target) => ({
+            ...target.item,
+            itemNumber: getPropertyItemDisplayNumber(target.item, year),
+            propertyName: getPropertyItemDisplayName(target.item),
+            entityIndex: target.entityIndex,
+            status: statusesByEntityKey[target.entityKey] ?? "unknown",
+        })))
+    ), [pickerTargets, statusesByEntityKey, year]);
+    const allTagCategories = useMemo(() => mergePropertyTagCategories(
+        searchableItems.flatMap((item) => item.tags ?? []),
+    ), [searchableItems]);
+    const activeSelectedTags = useMemo(() => (
+        selectedTags.filter((tag) => allTagCategories.includes(tag))
+    ), [allTagCategories, selectedTags]);
+    const tagFilteredItems = useMemo(() => (
+        filterPropertyItemsByTags(searchableItems, activeSelectedTags)
+    ), [activeSelectedTags, searchableItems]);
+    const tagCategories = useMemo(() => mergePropertyTagCategories(
+        activeSelectedTags,
+        tagFilteredItems.flatMap((item) => item.tags ?? []),
+    ), [activeSelectedTags, tagFilteredItems]);
+    const visibleTagCategories = useMemo(() => (
+        getVisiblePropertyTagCategories(tagCategories, activeSelectedTags, deferredKeyword)
+    ), [activeSelectedTags, deferredKeyword, tagCategories]);
     const filteredTargets = useMemo(() => {
-        const targets = pickerTargets ?? [];
-        if (!normalizedKeyword) return targets;
+        const optimizedMatches = searchPropertyItems(deferredKeyword, tagFilteredItems);
+        const normalizedKeyword = deferredKeyword.trim().toLocaleLowerCase();
+        const custodianMatches = normalizedKeyword
+            ? tagFilteredItems.filter((item) => (
+                item.custodianName?.toLocaleLowerCase().includes(normalizedKeyword)
+            ))
+            : [];
+        const matchedItems = [...optimizedMatches];
+        const matchedEntityKeys = new Set(
+            optimizedMatches.map((item) => getPropertyEntityKey(item.barcode, item.entityIndex)),
+        );
 
-        return targets.filter((target) => {
-            const itemNumber = getPropertyItemDisplayNumber(target.item, year);
-            return [
-                target.barcode,
-                itemNumber,
-                getPropertyItemDisplayName(target.item),
-                target.item.custodianName ?? "",
-            ].some((value) => value.toLowerCase().includes(normalizedKeyword));
+        for (const item of custodianMatches) {
+            const entityKey = getPropertyEntityKey(item.barcode, item.entityIndex);
+            if (matchedEntityKeys.has(entityKey)) continue;
+
+            matchedEntityKeys.add(entityKey);
+            matchedItems.push(item);
+        }
+
+        return matchedItems.flatMap((item) => {
+            const target = targetByEntityKey.get(getPropertyEntityKey(item.barcode, item.entityIndex));
+            return target ? [target] : [];
         });
-    }, [normalizedKeyword, pickerTargets, year]);
+    }, [deferredKeyword, tagFilteredItems, targetByEntityKey]);
+    const recentTargets = useMemo(() => (
+        recentEntityKeys.flatMap((entityKey) => {
+            const target = targetByEntityKey.get(entityKey);
+            return target ? [target] : [];
+        }).slice(0, 2)
+    ), [recentEntityKeys, targetByEntityKey]);
+    const recentEntityKeySet = useMemo(() => (
+        new Set(recentTargets.map((target) => target.entityKey))
+    ), [recentTargets]);
+    const hasActiveFilters = keyword.trim().length > 0 || activeSelectedTags.length > 0;
+    const listTargets = hasActiveFilters
+        ? filteredTargets
+        : filteredTargets.filter((target) => !recentEntityKeySet.has(target.entityKey));
+
+    useEffect(() => {
+        if (!state || !requestKey) return;
+
+        let active = true;
+
+        void (async () => {
+            try {
+                const statusPrecedence: PropertyStatus[] = ["unknown", "pending", "checked"];
+                const [recentKeys, statusGroups] = await Promise.all([
+                    getRecentPropertyEntityKeys(),
+                    year
+                        ? Promise.all(statusPrecedence.map(async (status) => ({
+                            status,
+                            entries: await getStoredAnnualStatusBarcodes(year, status),
+                        })))
+                        : Promise.resolve([]),
+                ]);
+                if (!active) return;
+
+                const nextStatuses = Object.fromEntries(
+                    state.targets.map((target) => [target.entityKey, "unknown"]),
+                ) as Record<string, PropertyStatus>;
+
+                for (const {status, entries} of statusGroups) {
+                    for (const entry of entries) {
+                        const parsedEntry = parsePropertyStatusEntryKey(entry);
+                        if (parsedEntry) {
+                            const entityKey = getPropertyEntityKey(parsedEntry.barcode, parsedEntry.entityIndex);
+                            if (targetByEntityKey.has(entityKey)) nextStatuses[entityKey] = status;
+                            continue;
+                        }
+
+                        for (const target of state.targets) {
+                            if (target.barcode === entry) nextStatuses[target.entityKey] = status;
+                        }
+                    }
+                }
+
+                setStatusesByEntityKey(nextStatuses);
+                setRecentEntityKeys(recentKeys);
+                setResolvedRequestKey(requestKey);
+                setLoadError(null);
+            } catch (error) {
+                console.error("讀取關聯財產狀態失敗:", error);
+                if (active) setLoadError("無法讀取盤點狀態，請重新讀取。");
+            }
+        })();
+
+        return () => {
+            active = false;
+        };
+    }, [loadAttempt, requestKey, state, targetByEntityKey, year]);
+
     const closePicker = () => {
+        Keyboard.dismiss();
         setKeyword("");
+        setSelectedTags([]);
+        setResolvedRequestKey(null);
+        setLoadError(null);
         onClose();
     };
     const selectTarget = (target: PropertyRelationshipTarget) => {
+        Keyboard.dismiss();
         setKeyword("");
+        setSelectedTags([]);
+        setResolvedRequestKey(null);
+        setLoadError(null);
         onSelect(target);
+    };
+    const toggleTag = (tag: string) => {
+        const selecting = !selectedTags.includes(tag);
+        setSelectedTags((current) => (
+            current.includes(tag) ? current.filter((value) => value !== tag) : [...current, tag]
+        ));
+        if (selecting) setKeyword("");
     };
 
     return (
         <Modal visible={visible} transparent animationType="fade" onRequestClose={closePicker}>
-            <View style={styles.modalOverlay}>
+            <KeyboardAvoidingView
+                behavior={Platform.OS === "ios" ? "padding" : "height"}
+                style={styles.modalOverlay}
+            >
                 <View style={[styles.modalInnerContainer, styles.relationshipPickerContainer]}>
                     <View style={styles.modalHeaderRow}>
                         <Text fontSize="xl" color="gray800" fontWeight="bold" style={styles.modalHeaderTitle} numberOfLines={2}>
@@ -1287,42 +1840,100 @@ function RelationshipPickerModal({
                         rounded={12}
                         borderColor="gray300"
                         fontSize="md"
-                        placeholder="搜尋品名、財產編號、項次或保管人"
+                        placeholder="搜尋品名、財產編號、備註、分類或保管人"
                         prefix={<Icon name="search" fontFamily="Feather" color="gray500" fontSize="lg" mr="sm" />}
-                    />
-                    <FlatList
-                        data={filteredTargets}
-                        keyExtractor={(target) => target.entityKey}
-                        keyboardShouldPersistTaps="handled"
-                        style={styles.relationshipPickerList}
-                        contentContainerStyle={filteredTargets.length === 0 ? styles.relationshipPickerEmptyContent : styles.relationshipPickerContent}
-                        renderItem={({item: target}) => (
-                            <TouchableOpacity
-                                activeOpacity={0.78}
-                                onPress={() => selectTarget(target)}
-                                style={styles.relationshipCandidateRow}
-                            >
-                                <View style={styles.relationshipCandidateText}>
-                                    <Text color="gray900" fontWeight="bold" fontSize="md" numberOfLines={1}>
-                                        {target.barcode}
-                                    </Text>
-                                    <Text mt={3} color="gray600" fontSize="sm" numberOfLines={1}>
-                                        {getPropertyItemDisplayName(target.item)}
-                                    </Text>
-                                </View>
-                                <Icon name="chevron-right" fontFamily="Feather" color="gray500" fontSize="xl" />
+                        suffix={keyword.length > 0 ? (
+                            <TouchableOpacity onPress={() => setKeyword("")} hitSlop={hitSlop}>
+                                <Icon name="x-circle" fontFamily="Feather" color="gray500" fontSize="lg" />
                             </TouchableOpacity>
-                        )}
-                        ListEmptyComponent={(
-                            <View style={styles.relationshipPickerEmpty}>
-                                <Text color="gray600" fontSize="md" textAlign="center">
-                                    {keyword.trim() ? "沒有符合條件的財產實體" : "沒有可選擇的財產實體"}
-                                </Text>
-                            </View>
-                        )}
+                        ) : undefined}
                     />
+                    {tagCategories.length > 0 && (
+                        <PropertyTagFilterBar
+                            tags={visibleTagCategories}
+                            selectedTags={activeSelectedTags}
+                            onToggle={toggleTag}
+                        />
+                    )}
+                    {loadError ? (
+                        <View style={styles.relationshipPickerEmpty}>
+                            <Icon name="alert-circle" fontFamily="Feather" color="#DC2626" fontSize={30} />
+                            <Text mt="sm" color="red600" fontSize="md" textAlign="center">{loadError}</Text>
+                            <Button
+                                mt="md"
+                                bg="blue600"
+                                rounded={10}
+                                onPress={() => {
+                                    setLoadError(null);
+                                    setResolvedRequestKey(null);
+                                    setLoadAttempt((value) => value + 1);
+                                }}
+                            >
+                                重新讀取
+                            </Button>
+                        </View>
+                    ) : (
+                        <>
+                            {!hasActiveFilters && (
+                                <View style={styles.relationshipRecentSection}>
+                                    <Text color="gray800" fontSize="md" fontWeight="bold">最近查看過</Text>
+                                    {!statusesReady ? (
+                                        <View style={styles.relationshipRecentLoading}>
+                                            <Text color="gray500" fontSize="sm">讀取最近項目...</Text>
+                                        </View>
+                                    ) : recentTargets.length > 0 ? (
+                                        <View style={styles.relationshipRecentContent}>
+                                            {recentTargets.map((target) => (
+                                                <RelationshipCandidateCard
+                                                    key={target.entityKey}
+                                                    target={target}
+                                                    year={year}
+                                                    status={statusesReady ? statusesByEntityKey[target.entityKey] ?? "unknown" : null}
+                                                    statusLoading={!statusesReady}
+                                                    recent
+                                                    onPress={() => selectTarget(target)}
+                                                />
+                                            ))}
+                                        </View>
+                                    ) : (
+                                        <Text mt="xs" color="gray500" fontSize="sm">尚無可選擇的最近查看項目</Text>
+                                    )}
+                                </View>
+                            )}
+                            <View style={styles.relationshipResultHeader}>
+                                <Text color="gray800" fontSize="md" fontWeight="bold">
+                                    {hasActiveFilters ? "篩選結果" : recentTargets.length > 0 ? "其他可選財產" : "所有可選財產"}
+                                </Text>
+                                <Text color="gray600" fontSize="sm">{listTargets.length} 筆</Text>
+                            </View>
+                            <FlatList
+                                data={listTargets}
+                                keyExtractor={(target) => target.entityKey}
+                                keyboardShouldPersistTaps="handled"
+                                keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+                                style={styles.relationshipPickerList}
+                                contentContainerStyle={listTargets.length === 0 ? styles.relationshipPickerEmptyContent : styles.relationshipPickerContent}
+                                renderItem={({item: target}) => (
+                                    <RelationshipCandidateCard
+                                        target={target}
+                                        year={year}
+                                        status={statusesReady ? statusesByEntityKey[target.entityKey] ?? "unknown" : null}
+                                        statusLoading={!statusesReady}
+                                        onPress={() => selectTarget(target)}
+                                    />
+                                )}
+                                ListEmptyComponent={(
+                                    <View style={styles.relationshipPickerEmpty}>
+                                        <Text color="gray600" fontSize="md" textAlign="center">
+                                            {hasActiveFilters ? "沒有符合條件的財產實體" : "沒有其他可選擇的財產實體"}
+                                        </Text>
+                                    </View>
+                                )}
+                            />
+                        </>
+                    )}
                 </View>
-            </View>
+            </KeyboardAvoidingView>
         </Modal>
     );
 }
@@ -1331,6 +1942,8 @@ function RelationshipItemCard({
     target,
     fallbackKey,
     year,
+    status,
+    statusLoading,
     actionIcon,
     actionDestructive = false,
     onPress,
@@ -1339,6 +1952,8 @@ function RelationshipItemCard({
     target: PropertyRelationshipTarget | null;
     fallbackKey?: string | null;
     year: string | null;
+    status: PropertyStatus | null;
+    statusLoading: boolean;
     actionIcon?: string;
     actionDestructive?: boolean;
     onPress: () => void;
@@ -1366,6 +1981,7 @@ function RelationshipItemCard({
                         },
                     ]}
                 >
+                    <PropertyStatusIndicator status={status} loading={statusLoading} />
                     <View style={styles.relationshipItemContent}>
                         <Text mb={2} fontSize={12} color="gray900" numberOfLines={1}>
                             {barcodeText}
@@ -1373,6 +1989,7 @@ function RelationshipItemCard({
                         <Text mt={2} fontSize={14} fontWeight="bold" color="gray700" lineHeight={19} numberOfLines={1}>
                             {propertyNameText}
                         </Text>
+                        {target && <RelationshipPropertyMetadata item={target.item} />}
                     </View>
                     {actionIcon && onActionPress && (
                         <TouchableOpacity
@@ -1426,6 +2043,8 @@ function PropertyRelationshipSection({
     item,
     entityIndex,
     targets,
+    statusesByEntityKey,
+    statusesLoading,
     year,
     disabled,
     onOpenParentPicker,
@@ -1437,6 +2056,8 @@ function PropertyRelationshipSection({
     item: PropertyItem;
     entityIndex: number;
     targets: PropertyRelationshipTarget[];
+    statusesByEntityKey: Record<string, PropertyStatus>;
+    statusesLoading: boolean;
     year: string | null;
     disabled: boolean;
     onOpenParentPicker: () => void;
@@ -1463,6 +2084,10 @@ function PropertyRelationshipSection({
                         target={parentTarget}
                         fallbackKey={item.parentEntityKey}
                         year={year}
+                        status={!statusesLoading && parentTarget && propertyRelationshipExistsInYear(parentTarget, year)
+                            ? statusesByEntityKey[parentTarget.entityKey] ?? "unknown"
+                            : null}
+                        statusLoading={statusesLoading && !!parentTarget && propertyRelationshipExistsInYear(parentTarget, year)}
                         actionIcon="x"
                         actionDestructive
                         onPress={() => onOpenTarget(parentTarget, item.parentEntityKey)}
@@ -1499,6 +2124,10 @@ function PropertyRelationshipSection({
                                     target={childTarget}
                                     fallbackKey={childEntityKey}
                                     year={year}
+                                    status={!statusesLoading && childTarget && propertyRelationshipExistsInYear(childTarget, year)
+                                        ? statusesByEntityKey[childTarget.entityKey] ?? "unknown"
+                                        : null}
+                                    statusLoading={statusesLoading && !!childTarget && propertyRelationshipExistsInYear(childTarget, year)}
                                     actionIcon="trash-2"
                                     actionDestructive
                                     onPress={() => onOpenTarget(childTarget, childEntityKey)}
@@ -1528,6 +2157,7 @@ function PropertyDetailBlock({
     status,
     year,
     onEditText,
+    onOpenTagging,
     onSelectArea,
     draftLocationArea,
     locationEditMode,
@@ -1541,6 +2171,8 @@ function PropertyDetailBlock({
     onPhotoOptions,
     addingPhoto,
     relationshipTargets,
+    relationshipStatusesByEntityKey,
+    statusesLoading,
     relationshipDisabled,
     onOpenParentPicker,
     onOpenChildPicker,
@@ -1558,9 +2190,10 @@ function PropertyDetailBlock({
     actualEntityIndex: number;
     total: number;
     areaLayout: AreaLayout | null;
-    status: PropertyStatus;
+    status: PropertyStatus | null;
     year: string | null;
     onEditText: (item: PropertyItem, entityIndex: number, field: PropertyItemEditableTextField) => void;
+    onOpenTagging: (item: PropertyItem, entityIndex: number) => void;
     onSelectArea: (item: PropertyItem, entityIndex: number, area: AreaLayoutArea | null) => void;
     draftLocationArea: {id: string; name: string} | null;
     locationEditMode: boolean;
@@ -1574,6 +2207,8 @@ function PropertyDetailBlock({
     onPhotoOptions: (item: PropertyItem, entityIndex: number, photo: PropertyPhoto) => void;
     addingPhoto: boolean;
     relationshipTargets: PropertyRelationshipTarget[];
+    relationshipStatusesByEntityKey: Record<string, PropertyStatus>;
+    statusesLoading: boolean;
     relationshipDisabled: boolean;
     onOpenParentPicker: () => void;
     onOpenChildPicker: () => void;
@@ -1587,7 +2222,7 @@ function PropertyDetailBlock({
     onManageSplit: () => void;
 }) {
     const {width: windowWidth} = useWindowDimensions();
-    const statusColors = PROPERTY_STATUS_COLORS[status];
+    const statusColors = status ? PROPERTY_STATUS_COLORS[status] : PROPERTY_STATUS_LOADING_COLORS;
     const [photoSectionWidth, setPhotoSectionWidth] = useState(0);
     const savedAreaId = areaLayout
         ? findAreaByIdOrName(areaLayout.areas, item.location.areaId, item.location.areaName)?.id ?? null
@@ -1636,7 +2271,16 @@ function PropertyDetailBlock({
                     <Text textAlign="center" color={statusColors.nameColor} fontWeight="bold" fontSize="md" numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.78}>
                         {statusTitle}
                     </Text>
-                    <Text mt={4} textAlign="center" color={statusColors.barcodeColor} fontWeight="bold" fontSize="xl">{PROPERTY_STATUS_LABELS[status]}</Text>
+                    <View
+                        accessible={!status}
+                        accessibilityRole={!status ? "progressbar" : undefined}
+                        accessibilityLabel={!status ? "正在更新目前盤點狀態" : undefined}
+                        style={styles.summaryStatusValue}
+                    >
+                        <Text textAlign="center" color={statusColors.barcodeColor} fontWeight="bold" fontSize="xl">
+                            {status ? PROPERTY_STATUS_LABELS[status] : "更新中"}
+                        </Text>
+                    </View>
                 </View>
                 <View style={[styles.summarySubCard, {backgroundColor: statusColors.cardBg}]}>
                     <Text textAlign="center" color={statusColors.nameColor} fontWeight="bold" fontSize="md">保管人</Text>
@@ -1669,6 +2313,10 @@ function PropertyDetailBlock({
                     label="其他備註"
                     value={item.note}
                     onPress={() => onEditText(item, actualEntityIndex, "note")}
+                />
+                <PropertyTaggingRow
+                    tags={item.tags}
+                    onPress={() => onOpenTagging(item, actualEntityIndex)}
                 />
                 <View style={styles.photoSection} onLayout={handlePhotoSectionLayout}>
                     <View style={styles.photoSectionHeader}>
@@ -1733,6 +2381,8 @@ function PropertyDetailBlock({
                     item={item}
                     entityIndex={actualEntityIndex}
                     targets={relationshipTargets}
+                    statusesByEntityKey={relationshipStatusesByEntityKey}
+                    statusesLoading={statusesLoading}
                     year={year}
                     disabled={relationshipDisabled}
                     onOpenParentPicker={onOpenParentPicker}
@@ -1814,11 +2464,16 @@ export default function Details() {
     const [relationshipPicker, setRelationshipPicker] = useState<RelationshipPickerState | null>(null);
     const [propertyStatus, setPropertyStatus] = useState<PropertyStatus>("unknown");
     const [entityStatuses, setEntityStatuses] = useState<PropertyStatus[]>([]);
+    const [relationshipStatusesByEntityKey, setRelationshipStatusesByEntityKey] = useState<Record<string, PropertyStatus>>({});
     const [viewingYear, setViewingYear] = useState<string | null>(null);
     const [selectedEntityIndex, setSelectedEntityIndex] = useState<number | null>(() => requestedEntityIndex);
     const [editingLockedFields, setEditingLockedFields] = useState(false);
     const [draftLocationArea, setDraftLocationArea] = useState<{id: string; name: string} | null>(null);
     const [editingTarget, setEditingTarget] = useState<EditingTarget | null>(null);
+    const [taggingTarget, setTaggingTarget] = useState<{barcode: string; entityIndex: number} | null>(null);
+    const [propertyTagCategories, setPropertyTagCategories] = useState<string[]>([]);
+    const [loadingPropertyTagCategories, setLoadingPropertyTagCategories] = useState(false);
+    const [savingPropertyTag, setSavingPropertyTag] = useState<string | null>(null);
     const [textSuggestions, setTextSuggestions] = useState<Record<PropertyItemEditableTextField, string[]>>({
         locationDescription: [],
         note: [],
@@ -1836,6 +2491,7 @@ export default function Details() {
     const [loading, setLoading] = useState(true);
     const [statusLoading, setStatusLoading] = useState(true);
     const [resolvedStatusRequestKey, setResolvedStatusRequestKey] = useState<string | null>(null);
+    const [presentedInitialRequestKey, setPresentedInitialRequestKey] = useState<string | null>(null);
     const [locationCompletionMessage, setLocationCompletionMessage] = useState<string | null>(null);
     const [locationCompletionKey, setLocationCompletionKey] = useState(0);
     const [previewingPhoto, setPreviewingPhoto] = useState<{
@@ -1844,6 +2500,9 @@ export default function Details() {
         photo: PropertyPhoto;
     } | null>(null);
     const locationCompletionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const propertyTagCategoriesRequestRef = useRef(0);
+    const propertyTagCategoriesCleanupRef = useRef<Promise<void> | null>(null);
+    const previousTaggingTargetRef = useRef<typeof taggingTarget>(null);
     const statusLookupKey = items.map((item) => item.sourceYears.join(",")).join("|");
     const itemYears = useMemo(() => (
         [...new Set(items.flatMap((item) => item.sourceYears))]
@@ -1881,6 +2540,17 @@ export default function Details() {
     const selectedItem = selectedEntityIndex !== null && visibleEntityIndexes.includes(selectedEntityIndex)
         ? items[selectedEntityIndex] ?? null
         : null;
+    const taggingItem = taggingTarget && taggingTarget.barcode === barcode
+        ? items[taggingTarget.entityIndex] ?? null
+        : null;
+    const relationshipEntityKeys = useMemo(() => {
+        if (!selectedItem) return [];
+
+        return [...new Set([
+            selectedItem.parentEntityKey,
+            ...(selectedItem.childEntityKeys ?? []),
+        ].filter((key): key is string => typeof key === "string" && parsePropertyEntityKey(key) !== null))];
+    }, [selectedItem]);
     const selectedVisibleEntityIndex = selectedEntityIndex !== null
         ? visibleEntityIndexes.indexOf(selectedEntityIndex)
         : -1;
@@ -1890,6 +2560,11 @@ export default function Details() {
         selectedEntityIndex ?? "select-entity",
         items.map((item) => item.sourceYears.join(",")).join("|"),
     ].join("::"), [barcode, items, selectedEntityIndex, viewingYear]);
+    const initialDisplayRequestKey = useMemo(() => [
+        routeBarcode ?? "missing-barcode",
+        requestedEntityIndex ?? "auto-entity",
+        requestedYear ?? "auto-year",
+    ].join("::"), [requestedEntityIndex, requestedYear, routeBarcode]);
     const displayedSelectedItem = selectedItem
         ? {
             ...selectedItem,
@@ -1957,13 +2632,19 @@ export default function Details() {
         ? {id: selectedItem.location.areaId, name: selectedItem.location.areaName}
         : null;
     const hasSelectedLocationArea = !!selectedItem?.location.areaName?.trim();
-    const statusLocked = propertyStatus !== "unknown";
+    const statusDataReady = !statusLoading && resolvedStatusRequestKey === statusRequestKey;
+    const statusLocked = statusDataReady && propertyStatus !== "unknown";
     const locationEditMode = editingLockedFields;
-    const fieldsEditable = !statusLocked || locationEditMode;
-    // Never render status-dependent details with a prior entity/year's status.
-    const pageLoading = loading || statusLoading || resolvedStatusRequestKey !== statusRequestKey;
+    const fieldsEditable = statusDataReady && (!statusLocked || locationEditMode);
+    const initialDisplayPending = presentedInitialRequestKey !== initialDisplayRequestKey;
+    // Keep the existing detail tree mounted during a same-entity focus refresh so
+    // the native ScrollView retains its offset. Status-dependent UI uses local
+    // loading placeholders until the refreshed values are ready.
+    const pageLoading = loading
+        || initialDisplayPending
+        || (selectedEntityIndex === null && !statusDataReady);
     const actionDisabled = pageLoading || statusLoading || !selectedItem || updatingStatus || updatingLocationArea || updatingRelationships;
-    const relationshipDisabled = pageLoading || !selectedItem || updatingRelationships || isSummaryOnlyQuickStatusView;
+    const relationshipDisabled = pageLoading || !statusDataReady || !selectedItem || updatingRelationships || isSummaryOnlyQuickStatusView;
     const showFixedActions = !pageLoading && !!selectedItem;
     const contentBottomPadding = showFixedActions
         ? Math.max(insets.bottom, 12) + (isQuickStatusView ? 178 : 156)
@@ -1990,6 +2671,28 @@ export default function Details() {
             }
         };
     }, []);
+
+    useEffect(() => {
+        const modalWasOpen = previousTaggingTargetRef.current !== null;
+        previousTaggingTargetRef.current = taggingTarget;
+        if (!modalWasOpen || taggingTarget !== null) return;
+
+        const previousCleanup = propertyTagCategoriesCleanupRef.current;
+        const cleanup = (async () => {
+            try {
+                await previousCleanup;
+                await pruneUnusedPropertyTagCategories();
+            } catch (error) {
+                console.error("清理未使用的分類標記失敗:", error);
+            }
+        })();
+        propertyTagCategoriesCleanupRef.current = cleanup;
+        void cleanup.finally(() => {
+            if (propertyTagCategoriesCleanupRef.current === cleanup) {
+                propertyTagCategoriesCleanupRef.current = null;
+            }
+        });
+    }, [taggingTarget]);
 
     useEffect(() => {
         let mounted = true;
@@ -2104,6 +2807,7 @@ export default function Details() {
                     if (!barcode || items.length === 0) {
                         if (active) {
                             setEntityStatuses([]);
+                            setRelationshipStatusesByEntityKey({});
                             setPropertyStatus("unknown");
                             setResolvedStatusRequestKey(statusRequestKey);
                         }
@@ -2112,19 +2816,32 @@ export default function Details() {
 
                     const years = viewingYear ? [viewingYear] : itemYears;
                     const nextEntityStatuses = Array<PropertyStatus>(items.length).fill("unknown");
+                    const nextRelationshipStatuses: Record<string, PropertyStatus> = {};
+                    const relationshipEntityKeySet = new Set(relationshipEntityKeys);
                     const statusPrecedence: PropertyStatus[] = ["unknown", "pending", "checked"];
 
                     for (const year of years) {
                         for (const status of statusPrecedence) {
                             const statusEntries = expandLegacyAnnualStatusEntries(
                                 await getStoredAnnualStatusBarcodes(year, status),
-                                (storedBarcode) => storedBarcode === barcode ? items.length : 0,
+                                (storedBarcode) => relationshipItemsByBarcode[storedBarcode]?.length
+                                    ?? (storedBarcode === barcode ? items.length : 0),
                             );
                             if (!active) return;
 
                             for (const entry of statusEntries) {
                                 const parsedEntry = parsePropertyStatusEntryKey(entry);
-                                if (!parsedEntry || parsedEntry.barcode !== barcode || parsedEntry.entityIndex >= items.length) continue;
+                                if (!parsedEntry) continue;
+
+                                const entityKey = getPropertyEntityKey(parsedEntry.barcode, parsedEntry.entityIndex);
+                                if (relationshipEntityKeySet.has(entityKey)) {
+                                    const relationshipItem = relationshipItemsByBarcode[parsedEntry.barcode]?.[parsedEntry.entityIndex];
+                                    if (relationshipItem && itemExistsInPropertyYear(relationshipItem.sourceYears, year)) {
+                                        nextRelationshipStatuses[entityKey] = status;
+                                    }
+                                }
+
+                                if (parsedEntry.barcode !== barcode || parsedEntry.entityIndex >= items.length) continue;
                                 const item = items[parsedEntry.entityIndex];
                                 if (!item || !itemExistsInPropertyYear(item.sourceYears, year)) continue;
 
@@ -2135,6 +2852,7 @@ export default function Details() {
 
                     if (active) {
                         setEntityStatuses(nextEntityStatuses);
+                        setRelationshipStatusesByEntityKey(nextRelationshipStatuses);
                         setPropertyStatus(selectedEntityIndex !== null
                             ? nextEntityStatuses[selectedEntityIndex] ?? "unknown"
                             : nextEntityStatuses[visibleEntityIndexes[0] ?? 0] ?? "unknown");
@@ -2148,7 +2866,17 @@ export default function Details() {
             return () => {
                 active = false;
             };
-        }, [barcode, itemYears, items, selectedEntityIndex, statusRequestKey, viewingYear, visibleEntityIndexes]),
+        }, [
+            barcode,
+            itemYears,
+            items,
+            relationshipEntityKeys,
+            relationshipItemsByBarcode,
+            selectedEntityIndex,
+            statusRequestKey,
+            viewingYear,
+            visibleEntityIndexes,
+        ]),
     );
 
     useEffect(() => {
@@ -2156,6 +2884,22 @@ export default function Details() {
 
         setPropertyStatus(entityStatuses[selectedEntityIndex] ?? "unknown");
     }, [entityStatuses, selectedEntityIndex]);
+
+    useEffect(() => {
+        if (loading || !statusDataReady) return;
+
+        setPresentedInitialRequestKey(initialDisplayRequestKey);
+    }, [initialDisplayRequestKey, loading, statusDataReady]);
+
+    useEffect(() => {
+        if (!statusDataReady || !selectedItem || selectedEntityIndex === null) return;
+
+        void rememberRecentPropertyEntity(
+            getPropertyEntityKey(selectedItem.barcode, selectedEntityIndex),
+        ).catch((error) => {
+            console.warn("記錄最近查看財產失敗:", error);
+        });
+    }, [selectedEntityIndex, selectedItem, statusDataReady]);
 
     useEffect(() => {
         setEditingLockedFields(false);
@@ -2168,6 +2912,7 @@ export default function Details() {
         setEditingLockedFields(false);
         setDraftLocationArea(null);
         setEditingTarget(null);
+        setTaggingTarget(null);
         setPreviewingPhoto(null);
     }, [isSummaryOnlyQuickStatusView]);
 
@@ -2235,11 +2980,79 @@ export default function Details() {
         void loadTextSuggestions(field);
     };
 
+    const openPropertyTagging = (item: PropertyItem, entityIndex: number) => {
+        const requestId = propertyTagCategoriesRequestRef.current + 1;
+        const pendingCleanup = propertyTagCategoriesCleanupRef.current;
+        propertyTagCategoriesRequestRef.current = requestId;
+        setTaggingTarget({barcode: item.barcode, entityIndex});
+        setPropertyTagCategories([]);
+        setLoadingPropertyTagCategories(true);
+
+        void (async () => {
+            await pendingCleanup;
+            return getStoredPropertyTagCategories();
+        })()
+            .then((categories) => {
+                if (propertyTagCategoriesRequestRef.current === requestId) {
+                    setPropertyTagCategories(categories);
+                }
+            })
+            .catch((error) => {
+                console.error("讀取分類標記失敗:", error);
+                if (propertyTagCategoriesRequestRef.current === requestId) {
+                    Alert.alert("讀取失敗", "無法讀取分類標記，請稍後再試。");
+                }
+            })
+            .finally(() => {
+                if (propertyTagCategoriesRequestRef.current === requestId) {
+                    setLoadingPropertyTagCategories(false);
+                }
+            });
+    };
+
+    const closePropertyTagging = () => {
+        if (savingPropertyTag) return;
+        propertyTagCategoriesRequestRef.current += 1;
+        setTaggingTarget(null);
+        setLoadingPropertyTagCategories(false);
+    };
+
+    const updatePropertyTagging = async (tag: string, selected: boolean, created = false) => {
+        if (!taggingTarget || savingPropertyTag) return;
+
+        const normalizedTag = normalizePropertyTag(tag);
+        setSavingPropertyTag(normalizedTag);
+        try {
+            const result = await setPropertyItemTagSelected(
+                taggingTarget.barcode,
+                taggingTarget.entityIndex,
+                normalizedTag,
+                selected,
+            );
+            setItems((previousItems) => previousItems.map((item, index) => (
+                item.barcode === taggingTarget.barcode && index === taggingTarget.entityIndex
+                    ? result.item
+                    : item
+            )));
+            setPropertyTagCategories(result.categories);
+            Alert.alert(
+                created ? "已建立並加入" : selected ? "已加入" : "已移除",
+                `「${normalizedTag}」`,
+            );
+        } catch (error) {
+            console.error("更新分類標記失敗:", error);
+            Alert.alert("儲存失敗", error instanceof Error ? error.message : "無法更新分類標記，請稍後再試。");
+        } finally {
+            setSavingPropertyTag(null);
+        }
+    };
+
     const selectEntity = (entityIndex: number) => {
         setSelectedEntityIndex(entityIndex);
         setEditingLockedFields(false);
         setDraftLocationArea(null);
         setEditingTarget(null);
+        setTaggingTarget(null);
         setPreviewingPhoto(null);
     };
 
@@ -2892,6 +3705,10 @@ export default function Details() {
         }
 
         const navigateToTarget = () => {
+            // Mask status-dependent values before this screen loses focus. On
+            // return, the preserved screen renders local loading placeholders
+            // instead of one frame of stale status data.
+            setStatusLoading(true);
             router.push({
                 pathname: "/stacks/details",
                 params: {
@@ -2944,11 +3761,15 @@ export default function Details() {
                     </Button>
                 </View>
                 <View style={styles.headerText}>
-                    <Text fontSize={22} fontWeight="bold" color="gray900">財產詳細資訊</Text>
-                    <Text mt={2} fontSize={14} color="gray600">{barcode? "編號："+barcode : "編號不明"}</Text>
+                    <Text fontSize={22} fontWeight="bold" color="gray900" numberOfLines={1}>財產詳細資訊</Text>
+                    <Text mt={2} fontSize={14} color="gray600" numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.78}>
+                        {barcode? "編號："+barcode : "編號不明"}
+                    </Text>
                 </View>
                 <View style={styles.headerYearSlot}>
-                    <DetailYearMenu years={detailYearOptions} selectedYear={viewingYear} onSelect={setViewingYear} />
+                    {!pageLoading && (
+                        <DetailYearMenu years={detailYearOptions} selectedYear={viewingYear} onSelect={setViewingYear} />
+                    )}
                 </View>
             </View>
 
@@ -2986,9 +3807,10 @@ export default function Details() {
                         actualEntityIndex={selectedEntityIndex}
                         total={visibleItems.length}
                         areaLayout={areaLayout}
-                        status={propertyStatus}
+                        status={statusDataReady ? propertyStatus : null}
                         year={viewingYear}
                         onEditText={openTextEditor}
+                        onOpenTagging={openPropertyTagging}
                         onSelectArea={selectLocationArea}
                         draftLocationArea={draftLocationArea}
                         locationEditMode={locationEditMode}
@@ -3002,6 +3824,8 @@ export default function Details() {
                         onPhotoOptions={openPhotoOptions}
                         addingPhoto={addingPhoto}
                         relationshipTargets={relationshipTargets}
+                        relationshipStatusesByEntityKey={relationshipStatusesByEntityKey}
+                        statusesLoading={!statusDataReady}
                         relationshipDisabled={relationshipDisabled}
                         onOpenParentPicker={openParentPicker}
                         onOpenChildPicker={openChildPicker}
@@ -3028,6 +3852,14 @@ export default function Details() {
                 onClose={() => setEditingTarget(null)}
                 onRequestEdit={requestTextEdit}
                 onSave={saveEditableText}
+            />
+            <PropertyTaggingModal
+                item={taggingItem}
+                categories={propertyTagCategories}
+                loading={loadingPropertyTagCategories}
+                savingTag={savingPropertyTag}
+                onClose={closePropertyTagging}
+                onSetTagSelected={updatePropertyTagging}
             />
             <RelationshipPickerModal
                 state={relationshipPicker}
@@ -3173,7 +4005,25 @@ export default function Details() {
                         >
                             {selectedItemInPropertyLabelQueue ? "長按從待製作財產標籤清單移除" : "加入待製作財產標籤清單"}
                         </Button>
-                        {propertyStatus === "unknown" ? (
+                        {!statusDataReady ? (
+                            <Button
+                                block
+                                mt="sm"
+                                bg="#F1F5F9"
+                                color="gray600"
+                                borderWidth={StyleSheet.hairlineWidth}
+                                borderColor="#CBD5E1"
+                                rounded={12}
+                                py="lg"
+                                fontWeight="bold"
+                                disabled
+                                accessible
+                                accessibilityRole="progressbar"
+                                accessibilityLabel="正在更新盤點狀態與可用操作"
+                            >
+                                正在更新盤點狀態...
+                            </Button>
+                        ) : propertyStatus === "unknown" ? (
                             <Div row mt="sm">
                                 <Button
                                     flex={1}
@@ -3333,6 +4183,11 @@ const styles = StyleSheet.create({
         shadowRadius: 12,
         elevation: 4,
     },
+    summaryStatusValue: {
+        marginTop: 4,
+        alignItems: "center",
+        justifyContent: "center",
+    },
     detailCard: {
         marginVertical: 12,
         padding: 5,
@@ -3384,9 +4239,29 @@ const styles = StyleSheet.create({
         flexDirection: "row",
         alignItems: "center",
     },
+    taggingDetailRow: {
+        flexDirection: "row",
+        alignItems: "center",
+    },
     editableDetailText: {
         flex: 1,
         minWidth: 0,
+    },
+    propertyTagChipList: {
+        paddingTop: 2,
+        flexDirection: "row",
+        flexWrap: "wrap",
+        gap: 6,
+    },
+    propertyTagChip: {
+        flexDirection: "row",
+        alignItems: "center",
+        paddingHorizontal: 9,
+        paddingVertical: 5,
+        borderRadius: 999,
+        backgroundColor: "#ECFDF3",
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: "#A7F3D0",
     },
     relationshipSection: {
         paddingVertical: 9,
@@ -3423,6 +4298,16 @@ const styles = StyleSheet.create({
     relationshipItemContent: {
         flex: 1,
         minWidth: 0,
+    },
+    relationshipStatusIcon: {
+        width: 26,
+        height: 26,
+        marginRight: 10,
+        borderRadius: 17,
+        flexShrink: 0,
+        alignItems: "center",
+        justifyContent: "center",
+        overflow: "hidden",
     },
     relationshipCardIconButton: {
         width: 34,
@@ -3816,6 +4701,81 @@ const styles = StyleSheet.create({
     },
     relationshipPickerContainer: {
         height: "76%",
+        maxWidth: 560,
+    },
+    taggingModalContainer: {
+        height: "72%",
+        maxWidth: 520,
+    },
+    taggingCreateButton: {
+        minHeight: 46,
+        marginTop: 10,
+        paddingHorizontal: 14,
+        borderRadius: 12,
+        flexDirection: "row",
+        alignItems: "center",
+        backgroundColor: "#EFF6FF",
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: "#93C5FD",
+    },
+    taggingCategoryList: {
+        flex: 1,
+        marginTop: 10,
+    },
+    taggingCategoryListContent: {
+        paddingBottom: 8,
+    },
+    taggingSectionHeader: {
+        minHeight: 30,
+        paddingHorizontal: 3,
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "space-between",
+    },
+    taggingAvailableSectionHeader: {
+        marginTop: 5,
+    },
+    taggingSelectedSectionBelow: {
+        marginTop: 10,
+    },
+    taggingSelectedEmpty: {
+        paddingHorizontal: 3,
+        paddingVertical: 10,
+    },
+    taggingAvailableEmpty: {
+        minHeight: 70,
+        alignItems: "center",
+        justifyContent: "center",
+    },
+    taggingCategoryEmptyContent: {
+        flexGrow: 1,
+    },
+    taggingCategoryEmpty: {
+        flex: 1,
+        minHeight: 150,
+        alignItems: "center",
+        justifyContent: "center",
+    },
+    taggingCategoryRow: {
+        minHeight: 52,
+        marginBottom: 8,
+        paddingHorizontal: 14,
+        paddingVertical: 9,
+        borderRadius: 12,
+        flexDirection: "row",
+        alignItems: "center",
+        backgroundColor: "#F8FAFC",
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: "#CBD5E1",
+    },
+    taggingCategoryRowSelected: {
+        backgroundColor: "#F0FDF4",
+        borderColor: "#86EFAC",
+    },
+    taggingCategoryText: {
+        flex: 1,
+        minWidth: 0,
+        paddingRight: 10,
     },
     splitModalContainer: {
         maxWidth: 440,
@@ -3869,7 +4829,6 @@ const styles = StyleSheet.create({
     },
     relationshipPickerList: {
         flex: 1,
-        marginTop: 4,
     },
     relationshipPickerContent: {
         paddingBottom: 8,
@@ -3882,6 +4841,30 @@ const styles = StyleSheet.create({
         minHeight: 160,
         alignItems: "center",
         justifyContent: "center",
+    },
+    relationshipRecentSection: {
+        flexShrink: 0,
+        paddingTop: 2,
+        paddingBottom: 8,
+    },
+    relationshipRecentContent: {
+        paddingTop: 8,
+    },
+    relationshipRecentLoading: {
+        minHeight: 58,
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "center",
+    },
+    relationshipRecentCard: {
+        width: "100%",
+    },
+    relationshipResultHeader: {
+        minHeight: 36,
+        paddingHorizontal: 2,
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "space-between",
     },
     relationshipCandidateRow: {
         minHeight: 62,
@@ -3899,6 +4882,20 @@ const styles = StyleSheet.create({
         flex: 1,
         minWidth: 0,
         paddingRight: 8,
+    },
+    relationshipCandidateTagList: {
+        marginTop: 3,
+        flexDirection: "row",
+        alignItems: "flex-start",
+        gap: 7,
+        overflow: "hidden",
+    },
+    relationshipCandidateTagItem: {
+        flexShrink: 0,
+    },
+    relationshipCandidateTagText: {
+        textDecorationLine: "underline",
+        textDecorationStyle: "solid",
     },
     modalHeaderRow: {
         width: "100%",

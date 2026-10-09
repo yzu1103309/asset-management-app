@@ -3,6 +3,7 @@ import {Pressable, StyleSheet, View} from "react-native";
 import {Text} from "react-native-magnus";
 import type {PropertyStatus} from "@/handlers/propertyStatusStore";
 import {PROPERTY_STATUS_CARD_SHADOW_COLOR, PROPERTY_STATUS_COLORS} from "@/constants/propertyStatusColors";
+import {getPropertyTagsForCard} from "@/handlers/propertyTagging";
 
 const absoluteFill = {
     position: "absolute" as const,
@@ -21,11 +22,12 @@ type ItemCardProps = {
         description: string | null;
     } | null;
     note?: string | null;
+    tags?: string[];
     status: PropertyStatus;
     onPress?: () => void;
 };
 
-const ItemCard = memo(function ItemCard({itemNumber, barcode, propertyName, location, note, status, onPress}: ItemCardProps) {
+const ItemCard = memo(function ItemCard({itemNumber, barcode, propertyName, location, note, tags, status, onPress}: ItemCardProps) {
     const statusStyle = PROPERTY_STATUS_COLORS[status];
     const locationText = [location?.areaName, location?.description]
         .map((value) => value?.trim())
@@ -33,6 +35,7 @@ const ItemCard = memo(function ItemCard({itemNumber, barcode, propertyName, loca
         .join("／");
     const noteText = note?.trim();
     const locationSummary = locationText ? `@ ${locationText}${noteText ? `（${noteText}）` : ""}` : null;
+    const cardTags = getPropertyTagsForCard(tags);
 
     return (
         <Pressable
@@ -67,6 +70,30 @@ const ItemCard = memo(function ItemCard({itemNumber, barcode, propertyName, loca
                             <Text mt={4} fontSize={12} color={statusStyle.nameColor} lineHeight={17} numberOfLines={1}>
                                 {locationSummary}
                             </Text>
+                        )}
+                        {cardTags.length > 0 && (
+                            <View style={styles.tagList}>
+                                {cardTags.map((tag, index) => (
+                                    <View
+                                        key={`${tag}:${index}`}
+                                        style={styles.tagItem}
+                                    >
+                                        <Text
+                                            fontSize={12}
+                                            color={statusStyle.nameColor}
+                                            lineHeight={17}
+                                            numberOfLines={1}
+                                            style={{
+                                                textDecorationLine: "underline",
+                                                textDecorationStyle: "solid",
+                                                textDecorationColor: statusStyle.nameColor,
+                                            }}
+                                        >
+                                            # {tag}
+                                        </Text>
+                                    </View>
+                                ))}
+                            </View>
                         )}
                     </View>
                     {pressed && <View pointerEvents="none" style={styles.pressedOverlay} />}
@@ -107,6 +134,16 @@ const styles = StyleSheet.create({
     },
     content: {
         flex: 1,
+    },
+    tagList: {
+        marginTop: 4,
+        flexDirection: "row",
+        alignItems: "flex-start",
+        gap: 8,
+        overflow: "hidden",
+    },
+    tagItem: {
+        flexShrink: 0,
     },
     pressedOverlay: {
         ...absoluteFill,

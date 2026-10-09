@@ -98,8 +98,23 @@ echo
 read -p "Commit these changes? [y/n] " commit_choice
 
 if [[ "$commit_choice" == "y" || "$commit_choice" == "Y" ]]; then
-    read -e -p "Enter commit message: " commit_msg
-    git commit -m "$commit_msg"
+    if ! command -v nano >/dev/null 2>&1; then
+        echo "Error: nano is required to edit the commit message."
+        exit 1
+    fi
+
+    commit_message_file=$(mktemp)
+    echo "Opening nano for the commit message. Save and exit when finished."
+    nano "$commit_message_file"
+
+    if ! grep -q '[^[:space:]]' "$commit_message_file"; then
+        rm -f "$commit_message_file"
+        echo "Commit message cannot be empty. Exiting."
+        exit 1
+    fi
+
+    git commit -F "$commit_message_file"
+    rm -f "$commit_message_file"
     git push
 else
     echo "No commit made. Exiting."

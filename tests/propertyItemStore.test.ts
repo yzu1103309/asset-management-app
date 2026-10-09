@@ -51,6 +51,7 @@ test("preserves existing field data when duplicate barcode entries are reimporte
                     description: "桌上",
                 },
                 note: "已貼標籤",
+                tags: ["網路設備", "待確認"],
             },
             {
                 itemNumber: "4",
@@ -86,6 +87,7 @@ test("preserves existing field data when duplicate barcode entries are reimporte
     assert.equal(result.createdCount, 0);
     assert.equal(result.updatedCount, 2);
     assert.equal(result.items["7654321-02-20001"][0].note, "已貼標籤");
+    assert.deepEqual(result.items["7654321-02-20001"][0].tags, ["網路設備", "待確認"]);
     assert.equal(result.items["7654321-02-20001"][0].custodianName, "新保管人");
     assert.deepEqual(result.items["7654321-02-20001"][0].location, storedItems["7654321-02-20001"][0].location);
     assert.deepEqual(result.items["7654321-02-20001"][1].location, storedItems["7654321-02-20001"][1].location);

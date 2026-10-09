@@ -9,7 +9,6 @@ const A4_HEIGHT_POINTS = 841.9;
 const KAIU_FONT_MODULE = require("../assets/fonts/kaiu.ttf");
 const TIMES_FONT_MODULE = require("../assets/fonts/times.ttf");
 const PROPERTY_LABEL_PDF_FILE_PATTERN = /^財產標籤_(全部|待製作)_\d{8}-\d{6}\.pdf$/;
-const PROPERTY_LABEL_PROGRESS_MILLISECONDS_PER_PERCENT = 300;
 
 export type PropertyLabelPdfExportResult = {
     uri: string;
@@ -23,9 +22,6 @@ export type PropertyLabelPdfKind = "全部" | "待製作";
 export type PropertyLabelPdfProgress = {
     message: string;
     progress: number;
-    targetProgress?: number;
-    millisecondsPerPercent?: number;
-    active?: boolean;
 };
 
 function padNumber(value: number): string {
@@ -76,9 +72,6 @@ export async function createPropertyLabelPdf(
     onProgress?.({
         message: "載入標籤字型",
         progress: 20,
-        targetProgress: 50,
-        millisecondsPerPercent: PROPERTY_LABEL_PROGRESS_MILLISECONDS_PER_PERCENT,
-        active: true,
     });
     await waitForProgressUiTick();
     const [kaiuFontDataUri, timesFontDataUri] = await Promise.all([
@@ -88,18 +81,12 @@ export async function createPropertyLabelPdf(
     onProgress?.({
         message: "產生標籤內容",
         progress: 50,
-        targetProgress: 75,
-        millisecondsPerPercent: PROPERTY_LABEL_PROGRESS_MILLISECONDS_PER_PERCENT,
-        active: true,
     });
     await waitForProgressUiTick();
     const html = await buildPropertyLabelPrintHtmlAsync(items, {kaiuFontDataUri, timesFontDataUri});
     onProgress?.({
         message: `產生 ${items.length} 張標籤 PDF`,
         progress: 80,
-        targetProgress: 90,
-        millisecondsPerPercent: PROPERTY_LABEL_PROGRESS_MILLISECONDS_PER_PERCENT,
-        active: true,
     });
     await waitForProgressUiTick();
     const result = await Print.printToFileAsync({

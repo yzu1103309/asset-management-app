@@ -1,4 +1,4 @@
-import {useEffect, useMemo, useRef, useState} from "react";
+import {useDeferredValue, useEffect, useMemo, useRef, useState} from "react";
 import {
     ActivityIndicator,
     FlatList,
@@ -16,14 +16,16 @@ import {useSafeAreaInsets} from "react-native-safe-area-context";
 import {centeredEdgeToEdgeModalProps} from "@/constants/centeredModal";
 import {getBottomModalSafeAreaPadding} from "@/constants/bottomModalSafeArea";
 import ItemCard from "@/components/main/ItemCard";
+import PropertyTagFilterBar from "@/components/PropertyTagFilterBar";
 import {
     getAnnualPropertyItems,
     sortAnnualPropertyListItems,
     type AnnualPropertyListItem,
 } from "@/handlers/propertyList";
-import {searchPropertyItems} from "@/handlers/propertySearch";
+import {filterPropertyItemsByTags, searchPropertyItems} from "@/handlers/propertySearch";
 import {PROPERTY_STATUS_VALUES} from "@/handlers/propertyStatusStore";
 import {usePropertyYear} from "@/context/PropertyYearContext";
+import {getVisiblePropertyTagCategories, mergePropertyTagCategories} from "@/handlers/propertyTagging";
 
 type SearchModalProps = {
     visible: boolean;
@@ -53,6 +55,7 @@ export default function SearchModal({visible, onClose, onNavigate}: SearchModalP
     const {selectedYear} = usePropertyYear();
     const bottomModalSafeAreaPadding = getBottomModalSafeAreaPadding(insets.bottom);
     const [keyword, setKeyword] = useState(() => persistedSearchKeyword);
+    const [selectedTags, setSelectedTags] = useState<string[]>([]);
     const [items, setItems] = useState<AnnualPropertyListItem[]>([]);
     const [sourceYear, setSourceYear] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
@@ -109,13 +112,29 @@ export default function SearchModal({visible, onClose, onNavigate}: SearchModalP
         };
     }, [modalReadyForDataLoad, selectedYear, visible]);
 
+    const deferredKeyword = useDeferredValue(keyword);
     const trimmedKeyword = keyword.trim();
     const shouldAutoFocusInput = visible && keyword.length === 0;
+    const allTagCategories = useMemo(() => mergePropertyTagCategories(
+        items.flatMap((item) => item.tags ?? []),
+    ), [items]);
+    const activeSelectedTags = useMemo(() => (
+        selectedTags.filter((tag) => allTagCategories.includes(tag))
+    ), [allTagCategories, selectedTags]);
+    const tagFilteredItems = useMemo(() => (
+        filterPropertyItemsByTags(items, activeSelectedTags)
+    ), [activeSelectedTags, items]);
+    const tagCategories = useMemo(() => mergePropertyTagCategories(
+        activeSelectedTags,
+        tagFilteredItems.flatMap((item) => item.tags ?? []),
+    ), [activeSelectedTags, tagFilteredItems]);
+    const visibleTagCategories = useMemo(() => (
+        getVisiblePropertyTagCategories(tagCategories, activeSelectedTags, deferredKeyword)
+    ), [activeSelectedTags, deferredKeyword, tagCategories]);
     const results = useMemo(() => {
-        if (!trimmedKeyword) return [];
-
-        return searchPropertyItems(trimmedKeyword, items);
-    }, [items, trimmedKeyword]);
+        return searchPropertyItems(deferredKeyword, tagFilteredItems);
+    }, [deferredKeyword, tagFilteredItems]);
+    const hasActiveFilters = trimmedKeyword.length > 0 || activeSelectedTags.length > 0;
 
     const updateKeyword = (nextKeyword: string) => {
         persistedSearchKeyword = nextKeyword;
@@ -127,6 +146,14 @@ export default function SearchModal({visible, onClose, onNavigate}: SearchModalP
         requestAnimationFrame(() => {
             inputRef.current?.focus?.();
         });
+    };
+
+    const toggleTag = (tag: string) => {
+        const selecting = !selectedTags.includes(tag);
+        setSelectedTags((current) => (
+            current.includes(tag) ? current.filter((value) => value !== tag) : [...current, tag]
+        ));
+        if (selecting) updateKeyword("");
     };
 
     const closeModal = () => {
@@ -148,6 +175,7 @@ export default function SearchModal({visible, onClose, onNavigate}: SearchModalP
             propertyName={item.propertyName}
             location={item.location}
             note={item.note}
+            tags={item.tags}
             status={item.status}
             onPress={() => navigateToItem(item)}
         />
@@ -216,7 +244,7 @@ export default function SearchModal({visible, onClose, onNavigate}: SearchModalP
                             onChangeText={updateKeyword}
                             fontSize="xl"
                             borderColor="gray400"
-                            placeholder="輸入品名、項次或財產編號"
+                            placeholder="輸入編號、品名、備註、分類等進行搜尋"
                             mb="sm"
                             hitSlop={{top: 10, bottom: 10, left: 10, right: 10}}
                             prefix={<Icon name="search" fontFamily="Feather" color="gray500" fontSize="lg" mr="sm" />}
@@ -227,12 +255,20 @@ export default function SearchModal({visible, onClose, onNavigate}: SearchModalP
                             ) : undefined}
                         />
 
+                        {tagCategories.length > 0 && (
+                            <PropertyTagFilterBar
+                                tags={visibleTagCategories}
+                                selectedTags={activeSelectedTags}
+                                onToggle={toggleTag}
+                            />
+                        )}
+
                         <View style={styles.resultHeader}>
                             <Text fontSize="md" fontWeight="bold" color="gray800">
-                                搜尋結果
+                                {hasActiveFilters ? "搜尋結果" : "所有財產"}
                             </Text>
                             <Text fontSize="sm" color="gray600">
-                                {trimmedKeyword ? `${results.length} 筆` : "輸入關鍵字後即時搜尋"}
+                                {`${results.length} 筆`}
                             </Text>
                         </View>
 
@@ -257,18 +293,11 @@ export default function SearchModal({visible, onClose, onNavigate}: SearchModalP
                                     尚未匯入財產資料。
                                 </Text>
                             </View>
-                        ) : !trimmedKeyword ? (
-                            <View style={styles.centerState}>
-                                <Icon name="search" fontFamily="Feather" color="gray500" fontSize={34} />
-                                <Text mt="sm" color="gray600" fontSize="md" textAlign="center">
-                                    可搜尋品名、項次，或輸入完整財產編號。
-                                </Text>
-                            </View>
                         ) : results.length === 0 ? (
                             <View style={styles.centerState}>
                                 <Icon name="inbox" fontFamily="Feather" color="gray500" fontSize={34} />
                                 <Text mt="sm" color="gray600" fontSize="md" textAlign="center">
-                                    找不到符合的財產資料。
+                                    {hasActiveFilters ? "找不到符合的財產資料。" : "目前沒有財產資料。"}
                                 </Text>
                             </View>
                         ) : (

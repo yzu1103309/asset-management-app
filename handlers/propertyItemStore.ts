@@ -36,6 +36,7 @@ export type PropertyItem = ParsedPropertyItem & {
     itemNumbersByYear?: Record<string, string>;
     location: PropertyLocation;
     note: string | null;
+    tags?: string[];
     photos?: PropertyPhoto[];
     split?: PropertyItemSplit;
     parentEntityKey?: string | null;
