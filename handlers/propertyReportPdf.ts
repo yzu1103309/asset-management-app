@@ -24,17 +24,23 @@ import {
     buildPropertyReportRows,
     getAreaLayoutReportOrientation,
     paginatePropertyReportRows,
+    type PropertyReportRow,
 } from "./propertyReportHtml.ts";
 import {mergePdfBytes} from "./pdfMerge.ts";
 
 const KAIU_FONT_MODULE = require("../assets/fonts/kaiu.ttf");
 const TIMES_FONT_MODULE = require("../assets/fonts/times.ttf");
 const PROPERTY_REPORT_FILE_PATTERN = /^盤點報告_.+_\d{8}-\d{6}\.pdf$/;
+// Keep source photo quality by default. Set to true to resize report images to
+// PROPERTY_REPORT_PHOTO_MAX_SIDE and re-encode them before PDF export.
+const PROPERTY_REPORT_COMPRESS_PHOTOS = true;
+// Custom fonts make every single-page HTML document much larger. Set to true
+// only when identical typography across devices is more important than speed.
+const PROPERTY_REPORT_EMBED_FONTS = true;
 const PROPERTY_REPORT_PHOTO_MAX_SIDE = 520;
 const A4_SHORT_EDGE_POINTS = 595.3;
 const A4_LONG_EDGE_POINTS = 841.9;
-const PHOTO_PROGRESS_START = 8;
-const PHOTO_PROGRESS_END = 28;
+const REPORT_DATA_READY_PROGRESS = 28;
 const DETAILS_PROGRESS_START = 36;
 const DETAILS_PROGRESS_END = 90;
 
@@ -93,10 +99,7 @@ function getAnnualPhotos(itemsByBarcode: PropertyItemsByBarcode, year: string): 
     return [...new Map(photos.map((photo) => [photo.id, photo])).values()];
 }
 
-async function readPhotoDataUris(
-    photos: PropertyPhoto[],
-    onProgress?: (completed: number, total: number) => void,
-): Promise<Map<string, string>> {
+async function readPhotoDataUris(photos: PropertyPhoto[]): Promise<Map<string, string>> {
     const dataUris = new Map<string, string>();
     const batchSize = 6;
 
@@ -108,7 +111,8 @@ async function readPhotoDataUris(
                 const file = new File(photo.uri);
                 if (!file.exists) return null;
 
-                if (Math.max(photo.width, photo.height) <= PROPERTY_REPORT_PHOTO_MAX_SIDE) {
+                if (!PROPERTY_REPORT_COMPRESS_PHOTOS
+                    || Math.max(photo.width, photo.height) <= PROPERTY_REPORT_PHOTO_MAX_SIDE) {
                     return [photo.id, `data:image/jpeg;base64,${await file.base64()}`] as const;
                 }
 
@@ -118,7 +122,7 @@ async function readPhotoDataUris(
                     : {height: PROPERTY_REPORT_PHOTO_MAX_SIDE});
                 const rendered = await context.renderAsync();
                 const thumbnail = await rendered.saveAsync({
-                    compress: 0.68,
+                    compress: 0.75,
                     format: SaveFormat.JPEG,
                 });
                 temporaryFile = new File(thumbnail.uri);
@@ -140,11 +144,38 @@ async function readPhotoDataUris(
         results.forEach((result) => {
             if (result) dataUris.set(result[0], result[1]);
         });
-        onProgress?.(Math.min(start + batch.length, photos.length), photos.length);
         await new Promise((resolve) => setTimeout(resolve, 0));
     }
 
     return dataUris;
+}
+
+async function hydrateReportPagePhotos(
+    rows: PropertyReportRow[],
+    photosById: ReadonlyMap<string, PropertyPhoto>,
+): Promise<void> {
+    const pagePhotos = [...new Set(rows.flatMap((row) => row.photos.map((photo) => photo.id)))]
+        .flatMap((photoId) => {
+            const photo = photosById.get(photoId);
+            return photo ? [photo] : [];
+        });
+    const pagePhotoDataUris = await readPhotoDataUris(pagePhotos);
+
+    rows.forEach((row) => {
+        row.photos.forEach((photo) => {
+            photo.dataUri = pagePhotoDataUris.get(photo.id) ?? "";
+        });
+        row.hasUnreadablePhotos = row.photos.some((photo) => !photo.dataUri);
+    });
+    pagePhotoDataUris.clear();
+}
+
+function releaseReportPagePhotos(rows: PropertyReportRow[]): void {
+    rows.forEach((row) => {
+        row.photos.forEach((photo) => {
+            photo.dataUri = "";
+        });
+    });
 }
 
 function waitForProgressUiTick(): Promise<void> {
@@ -188,25 +219,16 @@ export async function createPropertyReportPdf(
         AsyncStorage.getItem(PROPERTY_ITEMS_STORAGE_KEY),
         getAnnualStatusEntries(year),
         getStoredAreaLayout(),
-        getFontDataUri(KAIU_FONT_MODULE, "中文"),
-        getFontDataUri(TIMES_FONT_MODULE, "英文"),
+        PROPERTY_REPORT_EMBED_FONTS ? getFontDataUri(KAIU_FONT_MODULE, "中文") : Promise.resolve(null),
+        PROPERTY_REPORT_EMBED_FONTS ? getFontDataUri(TIMES_FONT_MODULE, "英文") : Promise.resolve(null),
     ]);
     const itemsByBarcode = parseStoredPropertyItems(storedItemsValue);
     const annualPhotos = getAnnualPhotos(itemsByBarcode, year);
-    onProgress?.({
-        message: annualPhotos.length > 0 ? "處理財產照片" : "整理盤點資料",
-        progress: PHOTO_PROGRESS_START,
-        current: 0,
-        total: annualPhotos.length,
-    });
-    const photoDataUris = await readPhotoDataUris(annualPhotos, (completed, total) => {
-        const progress = total > 0
-            ? PHOTO_PROGRESS_START + (completed / total) * (PHOTO_PROGRESS_END - PHOTO_PROGRESS_START)
-            : PHOTO_PROGRESS_END;
-        onProgress?.({message: "處理財產照片", progress, current: completed, total});
-    });
-    onProgress?.({message: "整理盤點資料", progress: PHOTO_PROGRESS_END});
-    const rows = buildPropertyReportRows(itemsByBarcode, year, statusEntries, photoDataUris);
+    onProgress?.({message: "整理盤點資料", progress: REPORT_DATA_READY_PROGRESS});
+    // Keep only metadata until its page is rendered. Holding every photo as a
+    // base64 string causes memory pressure that makes later pages slower.
+    const rows = buildPropertyReportRows(itemsByBarcode, year, statusEntries);
+    const annualPhotosById = new Map(annualPhotos.map((photo) => [photo.id, photo]));
 
     if (rows.length === 0) {
         throw new Error(`${year} 年度沒有可匯出的財產資料。`);
@@ -243,19 +265,19 @@ export async function createPropertyReportPdf(
         const detailPageFiles: File[] = [];
         let detailPageCount = 0;
         let completedRowCount = 0;
+        onProgress?.({
+            message: "產生財產明細頁",
+            progress: DETAILS_PROGRESS_START,
+            current: 0,
+            total: detailPageRows.length,
+        });
 
         for (let pageIndex = 0; pageIndex < detailPageRows.length; pageIndex += 1) {
             let pageCreated = false;
             while (!pageCreated) {
                 const pageRows = detailPageRows[pageIndex];
-                onProgress?.({
-                    message: "產生財產明細頁",
-                    progress: DETAILS_PROGRESS_START
-                        + (completedRowCount / rows.length) * (DETAILS_PROGRESS_END - DETAILS_PROGRESS_START),
-                    current: pageIndex + 1,
-                    total: detailPageRows.length,
-                });
                 await waitForProgressUiTick();
+                await hydrateReportPagePhotos(pageRows, annualPhotosById);
                 const detailResult = await Print.printToFileAsync({
                     html: buildPropertyReportDetailsPageHtml(htmlOptions, pageRows, pageIndex === 0),
                     width: A4_LONG_EDGE_POINTS,
@@ -270,8 +292,9 @@ export async function createPropertyReportPdf(
                     detailPageFiles.push(new File(detailResult.uri));
                     detailPageCount += 1;
                     completedRowCount += pageRows.length;
+                    releaseReportPagePhotos(pageRows);
                     onProgress?.({
-                        message: "財產明細頁完成",
+                        message: "產生財產明細頁",
                         progress: DETAILS_PROGRESS_START
                             + (completedRowCount / rows.length) * (DETAILS_PROGRESS_END - DETAILS_PROGRESS_START),
                         current: detailPageCount,
@@ -287,6 +310,7 @@ export async function createPropertyReportPdf(
                 } catch {
                     // The overflowing trial page is a cache file; cleanup failure is non-fatal.
                 }
+                releaseReportPagePhotos(pageRows);
 
                 if (pageRows.length <= 1) {
                     throw new Error("單一財產項目的內容高度超過一頁，無法建立不跨頁的盤點報告。");
