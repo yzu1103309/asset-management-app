@@ -952,6 +952,7 @@ const styles = StyleSheet.create({
     emptyText: {
         color: "#667085",
         fontSize: 14,
+        lineHeight: 20,
         textAlign: "center",
     },
     areaListContent: {
